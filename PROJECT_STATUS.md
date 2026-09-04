@@ -1,26 +1,26 @@
 # SYNAPSE PROJECT STATUS
 
 ## Current Status
-[COMPLETED] Competition Ready & Fully Audited — 100% Green (54/54 Tests Passed in 27.46s).
+[COMPLETED] Competition Ready & Fully Audited — 100% Green (54/54 Tests Passed in 30.06s).
 
 The system architecture has successfully transitioned to a decoupled production stack: an asynchronous Python **FastAPI Service** (`src/api/main.py`) serving the analytics engine and a **Next.js 14 (React / TypeScript / Tailwind CSS / Framer Motion)** frontend (`frontend/`), with legacy Streamlit UI preserved in `app.py` for standalone demo fallback.
 
 All machine learning metrics have been empirically validated via strict **Grouped-Holdout Cross-Validation** (20% held-out test runs, zero causal leakage across run boundaries) on our 110,000-row industrial dataset across 22 held-out test runs (22,000 observations):
 - **Active Fault Phase ($\text{stage} > 0.05$, N=4,520 observations):**
-  * Fault Detection Recall: **`90.1%`** (`0.9007`)
-  * Diagnostic Precision: **`94.2%`** (`0.9421`)
-  * Active Phase Accuracy: **`90.1%`** (`0.9007`)
-  * Harmonic F1-Score: **`92.0%`** (`0.9204`)
+  * Fault Detection Recall: **`94.5%`** (`0.9451`)
+  * Diagnostic Precision: **`95.5%`** (`0.9545`)
+  * Active Phase Accuracy: **`94.5%`** (`0.9451`)
+  * Harmonic F1-Score: **`94.8%`** (`0.9482`)
 - **Full-Trajectory Point-wise Evaluation (N=22,000 observations):**
-  * Pre-Fault Normal State Specificity: **`92.2%`** (`0.9215`) — *The model correctly maintains a nominal prediction during the ~350s pre-fault healthy lead-in rather than generating false early alarms.*
-  * Point-wise Overall Accuracy: **`56.1%`** (`0.5614`) — *Reflects early healthy lead-in steps evaluated against run-level fault labels.*
-  * Macro-Precision: **`75.5%`** (`0.7548`)
-  * Macro-F1 Score: **`60.1%`** (`0.6012`)
+  * Pre-Fault Normal State Specificity: **`99.3%`** (`0.9930`) — *The model correctly maintains a nominal prediction during the ~350s pre-fault healthy lead-in rather than generating false early alarms.*
+  * Point-wise Overall Accuracy: **`57.3%`** (`0.5725`) — *Reflects early healthy lead-in steps evaluated against run-level fault labels.*
+  * Macro-Precision: **`87.2%`** (`0.8717`)
+  * Macro-F1 Score: **`63.1%`** (`0.6312`)
 - **Anomaly Detection (Isolation Forest, Normal-Trained N=7,427):**
-  * Normal Inlier Retention: **`94.3%`** (`0.9430`)
-  * False Positive Alarm Rate ($\alpha$): **`5.7%`** (`0.0570`, suppressed by consecutive-sample temporal persistence)
-  * Outlier Anomaly Recall: **`49.8%`** (`0.4978`)
-- **Automated Regression Suite:** **54 / 54 tests passing (100% GREEN in 27.46s)**.
+  * Normal Inlier Retention: **`91.0%`** (`0.9095`)
+  * False Positive Alarm Rate ($\alpha$): **`9.1%`** (`0.0905`, suppressed by consecutive-sample temporal persistence)
+  * Outlier Anomaly Recall: **`40.5%`** (`0.4048`)
+- **Automated Regression Suite:** **54 / 54 tests passing (100% GREEN in 30.06s)**.
 
 ## Project Vision
 SYNAPSE is an explainable, evidence-first water-pump monitoring and decision-support system. It detects abnormal behavior, diagnoses likely causes, exposes traceable evidence, assesses risk, compares constrained alternatives, and runs human-approved simulations. It is advisory software and never autonomously controls a real pump.
@@ -36,10 +36,10 @@ Sensor source &rarr; data contract &rarr; cleaning &rarr; causal features &rarr;
 [COMPLETED] `data/raw/synthetic_pump_dataset.csv` is the default persisted artifact (110,000 rows across 110 runs, 11 scenarios with ±10% fault severity jitter and multi-pump cycling). CSV loading separates observations from fault type, severity, degradation stage, event bounds, and failure flag metadata.
 
 ## ML Design
-[COMPLETED] ExtraTrees condition/fault classifier (150 estimators, class_weight='balanced') achieving Active Fault Recall 90.1%, Precision 94.2%, and Harmonic F1 92.0%, paired with normal-only Isolation Forest anomaly detector achieving 94.3% Normal Inlier Retention and 5.7% False Alarm Rate. Grouped 80/20 train/test split per scenario (zero causal leakage). 0–100 Health Score blending classifier risk, anomaly probability, and diagnostic support. No direct degradation model mutation.
+[COMPLETED] Upgraded ExtraTrees condition/fault classifier (300 estimators, max_depth=26, class_weight='balanced') with multi-scale rolling statistics (5s, 15s, 30s), dynamic derivatives ($dz/dt$), and vibration shape/kurtosis. Achieves Active Fault Recall 94.5%, Precision 95.5%, and Harmonic F1 94.8%, paired with normal-only Isolation Forest anomaly detector achieving 91.0% Normal Inlier Retention and 9.1% False Alarm Rate. Grouped 80/20 train/test split per scenario (zero causal leakage). 0–100 Health Score blending classifier risk, anomaly probability, and diagnostic support. No direct degradation model mutation.
 
 ## Pipeline Latency
-[VERIFIED] End-to-end persisted pipeline runtime on 110,000 records measured at 14.73s (target < 30.0s). Zero row-wise apply loops, vectorized causal feature engineering, and single-pass run pre-grouping.
+[VERIFIED] Optimized pipeline execution and empirical validation across 110,000 observations measured at 26.42s (budget ceiling < 28.0s). Full inference replay on 110k rows executes in 14.73s. Zero row-wise apply loops, vectorized causal feature engineering, and single-pass run pre-grouping.
 
 ## XAI Design
 [COMPLETED] Evidence Cards preserve actual feature values, baselines, deviations, units, contributions, trace paths, source taxonomy, alternatives, assumptions, and review state.

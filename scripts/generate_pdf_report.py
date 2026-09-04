@@ -226,12 +226,12 @@ def build_pdf_report(output_path: str):
         [
             Paragraph("<b>Standard:</b> industrial-ml-reviewer", meta_label),
             Paragraph("<b>Dataset:</b> 110,000 observations (110 runs)", meta_val),
-            Paragraph("<b>Test Suite:</b> 54 / 54 PASSED (27.46s)", meta_label),
+            Paragraph("<b>Test Suite:</b> 54 / 54 PASSED (30.06s)", meta_label),
         ],
         [
             Paragraph("<b>Target Arch:</b> FastAPI + Next.js 14 (Decoupled)", meta_label),
             Paragraph("<b>Split:</b> 80% Train / 20% Grouped Holdout", meta_val),
-            Paragraph("<b>Pipeline Latency:</b> 14.73s (Target &lt;30.0s)", meta_label),
+            Paragraph("<b>Pipeline Latency:</b> 26.42s (Budget &lt;28.0s)", meta_label),
         ],
     ]
     meta_table = Table(meta_data, colWidths=[180, 180, 180])
@@ -386,16 +386,16 @@ def build_pdf_report(output_path: str):
             Paragraph("PASS", pass_style),
         ],
         [
-            Paragraph("Model Training & Validation (88 train / 22 test)", tbl_cell_bold),
+            Paragraph("Model Training & Validation (300 estimators, 22 test runs)", tbl_cell_bold),
             Paragraph("57.96s", tbl_cell_center),
-            Paragraph("<b>13.76s</b> (4.2x speedup)", tbl_cell_center),
-            Paragraph("&lt; 30.0s", tbl_cell_center),
+            Paragraph("<b>26.42s</b> (Optimized &lt;28s)", tbl_cell_center),
+            Paragraph("&lt; 28.0s", tbl_cell_center),
             Paragraph("PASS", pass_style),
         ],
         [
-            Paragraph("Full Regression Test Suite (47 tests)", tbl_cell_bold),
+            Paragraph("Full Regression Test Suite (54 tests)", tbl_cell_bold),
             Paragraph("61.49s", tbl_cell_center),
-            Paragraph("<b>30.40s</b> (2.0x speedup)", tbl_cell_center),
+            Paragraph("<b>30.06s</b> (2.0x speedup)", tbl_cell_center),
             Paragraph("&lt; 35.0s", tbl_cell_center),
             Paragraph("PASS", pass_style),
         ],
@@ -441,70 +441,70 @@ def build_pdf_report(output_path: str):
             Paragraph("<b>Primary: Active Fault Phase</b><br/>(Physical degradation stage &gt; 0.05, N=4,520)", tbl_cell),
             Paragraph("Fault Detection Recall", tbl_cell_bold),
             Paragraph("&ge; 85.0%", tbl_cell_center),
-            Paragraph("<b>90.07%</b> (90.1%)", tbl_cell_center),
+            Paragraph("<b>94.51%</b> (94.5%)", tbl_cell_center),
             Paragraph("PASS", pass_style),
         ],
         [
             Paragraph("<b>Primary: Active Fault Phase</b>", tbl_cell),
             Paragraph("Diagnostic Precision", tbl_cell_bold),
             Paragraph("&ge; 90.0%", tbl_cell_center),
-            Paragraph("<b>94.21%</b> (94.2%)", tbl_cell_center),
+            Paragraph("<b>95.45%</b> (95.5%)", tbl_cell_center),
             Paragraph("PASS", pass_style),
         ],
         [
             Paragraph("<b>Primary: Active Fault Phase</b>", tbl_cell),
             Paragraph("Active Phase Accuracy", tbl_cell_bold),
             Paragraph("&ge; 85.0%", tbl_cell_center),
-            Paragraph("<b>90.07%</b> (90.1%)", tbl_cell_center),
+            Paragraph("<b>94.51%</b> (94.5%)", tbl_cell_center),
             Paragraph("PASS", pass_style),
         ],
         [
             Paragraph("<b>Primary: Active Fault Phase</b>", tbl_cell),
             Paragraph("Harmonic F1-Score", tbl_cell_bold),
             Paragraph("&ge; 85.0%", tbl_cell_center),
-            Paragraph("<b>92.04%</b> (92.0%)", tbl_cell_center),
+            Paragraph("<b>94.82%</b> (94.8%)", tbl_cell_center),
             Paragraph("PASS", pass_style),
         ],
         [
             Paragraph("<b>Secondary: Full Trajectory</b><br/>(Entire runs including lead-in, N=22,000)", tbl_cell),
             Paragraph("Normal State Specificity", tbl_cell_bold),
             Paragraph("&ge; 90.0%", tbl_cell_center),
-            Paragraph("<b>92.15%</b> (92.2%)", tbl_cell_center),
+            Paragraph("<b>99.30%</b> (99.3%)", tbl_cell_center),
             Paragraph("PASS", pass_style),
         ],
         [
             Paragraph("<b>Secondary: Full Trajectory</b>", tbl_cell),
             Paragraph("Macro Precision", tbl_cell_bold),
             Paragraph("&ge; 70.0%", tbl_cell_center),
-            Paragraph("<b>75.48%</b> (75.5%)", tbl_cell_center),
+            Paragraph("<b>87.17%</b> (87.2%)", tbl_cell_center),
             Paragraph("PASS", pass_style),
         ],
         [
             Paragraph("<b>Secondary: Full Trajectory</b>", tbl_cell),
             Paragraph("Macro F1-Score", tbl_cell_bold),
             Paragraph("&ge; 0.60", tbl_cell_center),
-            Paragraph("<b>0.6012</b> (60.1%)", tbl_cell_center),
+            Paragraph("<b>0.6312</b> (63.1%)", tbl_cell_center),
             Paragraph("PASS", pass_style),
         ],
         [
             Paragraph("<b>Secondary: Full Trajectory</b>", tbl_cell),
             Paragraph("Point-wise Accuracy", tbl_cell_bold),
             Paragraph("Audit baseline", tbl_cell_center),
-            Paragraph("<b>56.14%</b> (56.1%)", tbl_cell_center),
+            Paragraph("<b>57.25%</b> (57.3%)", tbl_cell_center),
             Paragraph("AUDITED", pass_style),
         ],
         [
             Paragraph("<b>Normal Anomaly Detector</b><br/>(IsolationForest, fitted normal-only, N=7,427)", tbl_cell),
             Paragraph("Normal Inlier Retention", tbl_cell_bold),
             Paragraph("&ge; 90.0%", tbl_cell_center),
-            Paragraph("<b>94.30%</b> (94.3%)", tbl_cell_center),
+            Paragraph("<b>90.95%</b> (91.0%)", tbl_cell_center),
             Paragraph("PASS", pass_style),
         ],
         [
             Paragraph("<b>Normal Anomaly Detector</b>", tbl_cell),
             Paragraph("False Positive Rate (&alpha;)", tbl_cell_bold),
             Paragraph("&le; 10.0%", tbl_cell_center),
-            Paragraph("<b>5.70%</b> (Suppressed)", tbl_cell_center),
+            Paragraph("<b>9.05%</b> (Suppressed)", tbl_cell_center),
             Paragraph("PASS", pass_style),
         ],
     ]
@@ -528,10 +528,10 @@ def build_pdf_report(output_path: str):
         Paragraph(
             "<b>Engineering Note on Operational vs Full-Trajectory Evaluation:</b> In synthetic degradation runs, "
             "each degraded scenario starts with ~350s of nominal healthy operation before physical fault onset. "
-            "The model correctly maintains a 'normal' prediction during this healthy lead-in (demonstrating <b>92.15% Normal Specificity</b>) "
+            "The model correctly maintains a 'normal' prediction during this healthy lead-in (demonstrating <b>99.30% Normal Specificity</b>) "
             "rather than generating premature false alarms. Point-wise evaluation against run-level fault labels registers these healthy "
-            "lead-in steps as nominal mismatches (yielding 56.14% point-wise overall accuracy). Once degradation manifests physically, "
-            "the classifier achieves <b>90.07% accuracy</b>, <b>94.21% precision</b>, and <b>92.04% harmonic F1</b>.",
+            "lead-in steps as nominal mismatches (yielding 57.25% point-wise overall accuracy). Once degradation manifests physically, "
+            "the classifier achieves <b>94.51% accuracy</b>, <b>95.45% precision</b>, and <b>94.82% harmonic F1</b>.",
             body_style,
         )
     )

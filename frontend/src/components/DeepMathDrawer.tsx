@@ -194,7 +194,7 @@ export const DeepMathDrawer: React.FC<DeepMathDrawerProps> = ({
                   </p>
                 </div>
                 <span className="text-[10px] font-mono text-slate-400">
-                  Classifier: ExtraTrees (150 estimators, max_depth=25)
+                  Classifier: ExtraTrees (300 estimators, max_depth=26, balanced)
                 </span>
               </div>
 

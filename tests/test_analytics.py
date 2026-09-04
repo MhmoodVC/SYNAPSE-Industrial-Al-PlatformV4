@@ -97,6 +97,21 @@ def test_sustainability_metrics_positive_excess() -> None:
     assert abs(metrics["co2_kg_hr"] - round(expected_co2_hr, 3)) < 1e-4
     assert abs(metrics["annual_co2_tonnes"] - round(expected_annual, 3)) < 1e-4
     assert metrics["avoidable_waste_percent"] > 0.0
+    assert metrics["excess_kw"] == metrics["excess_power_kw"]
+    assert metrics["co2_waste_kg_h"] == metrics["co2_kg_hr"]
+    assert metrics["annual_penalty_t"] == metrics["annual_co2_tonnes"]
+    assert metrics["avoidable_co2_kg_per_h"] == metrics["co2_kg_hr"]
+    assert metrics["annual_carbon_waste_tonnes"] == metrics["annual_co2_tonnes"]
+
+    # Active degradation stage guaranteed positive non-zero even with baseline current
+    deg_metrics = compute_sustainability_metrics(
+        actual_current=20.0,
+        baseline_median_current=20.0,
+        degradation_stage=0.25,
+    )
+    assert deg_metrics["excess_kw"] > 0.0
+    assert deg_metrics["co2_waste_kg_h"] > 0.0
+    assert deg_metrics["annual_penalty_t"] > 0.0
 
 
 def test_sensitivity_costs_monotonic_scaling() -> None:

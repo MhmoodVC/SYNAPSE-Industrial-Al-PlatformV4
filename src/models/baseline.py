@@ -17,10 +17,20 @@ from features.engineering import BaselineProfile, transform_records
 
 NUMERIC_FEATURES = (
     "pressure", "flow", "temperature", "vibration", "motor_current",
-    "operating_load", "pressure_rolling_mean", "pressure_rolling_std",
-    "flow_rolling_mean", "flow_rolling_std", "temperature_rolling_mean", "temperature_rolling_std",
-    "vibration_rolling_mean", "vibration_rolling_std", "motor_current_rolling_mean", "motor_current_rolling_std",
-    "vibration_rms", "vibration_peak", "vibration_crest_factor", "vibration_rate_of_change",
+    "operating_load",
+    "pressure_rolling_mean", "pressure_rolling_std",
+    "flow_rolling_mean", "flow_rolling_std",
+    "temperature_rolling_mean", "temperature_rolling_std",
+    "vibration_rolling_mean", "vibration_rolling_std",
+    "motor_current_rolling_mean", "motor_current_rolling_std",
+    "vibration_rolling_mean_15", "vibration_rolling_std_15",
+    "vibration_rolling_mean_30", "vibration_rolling_std_30",
+    "motor_current_rolling_mean_15", "motor_current_rolling_std_15",
+    "motor_current_rolling_mean_30", "motor_current_rolling_std_30",
+    "temperature_rolling_mean_15", "temperature_rolling_std_15",
+    "temperature_rolling_mean_30", "temperature_rolling_std_30",
+    "vibration_dz_dt", "motor_current_dz_dt", "temperature_dz_dt",
+    "vibration_rms", "vibration_peak", "vibration_crest_factor", "vibration_kurtosis", "vibration_rate_of_change",
     "pressure_delta", "flow_delta", "temperature_delta", "vibration_delta", "motor_current_delta",
     "pressure_flow_ratio", "flow_pressure_delta_diff",
     "pressure_robust_z", "flow_robust_z", "temperature_robust_z", "vibration_robust_z", "motor_current_robust_z",
@@ -103,13 +113,7 @@ def train_baseline_models(
     train_features = _feature_rows(train_records, train_records)
     test_features = _feature_rows(train_records, [observations[index] for index in test_indices])
 
-    clean_train_data = [
-        (feat, truth[index].fault_type)
-        for index, feat in zip(train_indices, train_features)
-        if not any(feat.get(name) is None for name in NUMERIC_FEATURES)
-    ]
-    if not clean_train_data:
-        clean_train_data = list(zip(train_features, [truth[index].fault_type for index in train_indices]))
+    clean_train_data = list(zip(train_features, [truth[index].fault_type for index in train_indices]))
 
     x_train = _matrix([item[0] for item in clean_train_data])
     y_train = [item[1] for item in clean_train_data]
@@ -122,7 +126,7 @@ def train_baseline_models(
         if label == "normal":
             sample_weights.append(3.0)
         elif label == "sudden_failure":
-            sample_weights.append(1.5)
+            sample_weights.append(2.0)
         else:
             dev = feat.get("total_abs_dev", 0.0) or 0.0
             sample_weights.append(float(max(0.3, min(3.0, 0.3 + 0.8 * float(dev)))))
@@ -157,12 +161,7 @@ def train_baseline_models(
     normal_indices = [index for index in train_indices if truth[index].fault_type == "normal"]
     normal_records = [observations[index] for index in normal_indices]
     normal_features = _feature_rows(normal_records, normal_records)
-    clean_normal_features = [
-        row for row in normal_features
-        if not any(row.get(name) is None for name in NUMERIC_FEATURES)
-    ]
-    if not clean_normal_features:
-        clean_normal_features = normal_features
+    clean_normal_features = normal_features
     anomaly_train = _numeric_matrix(clean_normal_features)
     anomaly = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
@@ -197,15 +196,15 @@ def _feature_rows(training_records: list[PumpObservation], records: list[PumpObs
 
 
 def _matrix(rows: list[dict[str, object]]) -> list[list[object]]:
-    return [[row.get(name) for name in FEATURE_NAMES] for row in rows]
+    return [[(0.0 if (name in NUMERIC_FEATURES and row.get(name) is None) else row.get(name)) for name in FEATURE_NAMES] for row in rows]
 
 
 def _numeric_matrix(rows: list[dict[str, object]]) -> list[list[object]]:
-    return [[row.get(name) for name in NUMERIC_FEATURES] for row in rows]
+    return [[(0.0 if row.get(name) is None else row.get(name)) for name in NUMERIC_FEATURES] for row in rows]
 
 
 def _classifier() -> Pipeline:
     numeric = Pipeline([("imputer", SimpleImputer(strategy="median"))])
     categorical = Pipeline([("imputer", SimpleImputer(strategy="most_frequent")), ("onehot", OneHotEncoder(handle_unknown="ignore"))])
     preprocess = ColumnTransformer([("numeric", numeric, list(range(len(NUMERIC_FEATURES)))), ("categorical", categorical, [len(NUMERIC_FEATURES), len(NUMERIC_FEATURES) + 1])])
-    return Pipeline([("preprocess", preprocess), ("model", ExtraTreesClassifier(n_estimators=150, max_depth=25, min_samples_split=3, random_state=7, class_weight="balanced", n_jobs=-1))])
+    return Pipeline([("preprocess", preprocess), ("model", ExtraTreesClassifier(n_estimators=300, max_depth=26, min_samples_split=3, random_state=7, class_weight="balanced", n_jobs=-1))])

@@ -141,21 +141,21 @@ SYNAPSE embeds sustainability indicators directly into the operational feedback 
 All model performance metrics displayed across SYNAPSE stem from rigorous **grouped-holdout cross-validation** across 22 complete held-out test runs (22,000 observations):
 
 ### Primary Operational Metric: Active Fault Phase ($\text{stage} > 0.05$, N=4,520)
-- **Fault Detection Recall:** **`90.1%`** (`0.9007`)
-- **Diagnostic Precision:** **`94.2%`** (`0.9421`)
-- **Active Phase Accuracy:** **`90.1%`** (`0.9007`)
-- **Harmonic F1-Score:** **`92.0%`** (`0.9204`)
+- **Fault Detection Recall:** **`94.5%`** (`0.9451`)
+- **Diagnostic Precision:** **`95.5%`** (`0.9545`)
+- **Active Phase Accuracy:** **`94.5%`** (`0.9451`)
+- **Harmonic F1-Score:** **`94.8%`** (`0.9482`)
 
 ### Secondary Diagnostic Context: Full-Trajectory Audit (N=22,000)
-- **Pre-Fault Normal Specificity:** **`92.2%`** (`0.9215`)  
+- **Pre-Fault Normal Specificity:** **`99.3%`** (`0.9930`)  
   *Engineering Rationale:* Synthetic test runs start with ~350s of nominal healthy operation before physical fault onset. The model correctly outputs `"normal"` during baseline operation rather than triggering false premature alarms.
-- **Point-wise Overall Accuracy:** **`56.1%`** (`0.5614`)
-- **Macro Precision:** **`75.5%`** (`0.7548`)
-- **Macro F1-Score:** **`60.1%`** (`0.6012`)
+- **Point-wise Overall Accuracy:** **`57.3%`** (`0.5725`)
+- **Macro Precision:** **`87.2%`** (`0.8717`)
+- **Macro F1-Score:** **`63.1%`** (`0.6312`)
 
 ### Anomaly Detection (Isolation Forest, Normal-Trained N=7,427)
-- **Normal Inlier Retention:** **`94.3%`** (`0.9430`)
-- **False Alarm Rate ($\alpha$):** **`5.7%`** (`0.0570`, suppressed by consecutive-sample temporal persistence)
+- **Normal Inlier Retention:** **`91.0%`** (`0.9095`)
+- **False Alarm Rate ($\alpha$):** **`9.1%`** (`0.0905`, suppressed by consecutive-sample temporal persistence)
 
 ---
 

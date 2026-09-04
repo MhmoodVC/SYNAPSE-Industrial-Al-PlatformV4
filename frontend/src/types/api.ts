@@ -67,10 +67,16 @@ export interface PrognosticsResult {
 }
 
 export interface SustainabilityMetrics {
-  excess_power_kw: number;
-  avoidable_co2_kg_per_h: number;
-  annual_carbon_waste_tonnes: number;
-  waste_percentage: number;
+  excess_power_kw?: number;
+  excess_kw?: number;
+  avoidable_co2_kg_per_h?: number;
+  co2_kg_hr?: number;
+  co2_waste_kg_h?: number;
+  annual_carbon_waste_tonnes?: number;
+  annual_co2_tonnes?: number;
+  annual_penalty_t?: number;
+  avoidable_waste_percent?: number;
+  waste_percentage?: number;
 }
 
 export interface EvidencePart {

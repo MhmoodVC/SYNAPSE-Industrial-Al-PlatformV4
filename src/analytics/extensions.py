@@ -125,12 +125,19 @@ def compute_sustainability_metrics(
     voltage: float = 400.0,
     power_factor: float = 0.85,
     grid_emission_factor: float = 0.45,
+    degradation_stage: float = 0.0,
 ) -> dict[str, float]:
     """Calculate excess power dissipation, avoidable CO2 emission rates, and annual carbon waste.
 
     Physics Formulation
     -------------------
-    Excess Current (A)      : I_excess = max(0.0, actual_current - baseline_median_current)
+    Excess Current (A)      : If actual_current > baseline_median_current:
+                                  I_excess = actual_current - baseline_median_current
+                              Else if degradation_stage > 0.05:
+                                  # Parasitic friction/hydraulic dissipation under active degradation
+                                  I_excess = max(0.05, baseline_median_current * 0.04 * min(1.0, degradation_stage))
+                              Else:
+                                  I_excess = 0.0
     Excess Real Power (kW)  : P_excess = (sqrt(3) * V * I_excess * PF) / 1000.0
     CO2 Rate (kg/hr)        : P_excess * grid_emission_factor
     Annual Carbon (tonnes)  : (CO2_rate * 8000 operating hours) / 1000.0
@@ -140,8 +147,13 @@ def compute_sustainability_metrics(
     v = max(0.0, float(voltage))
     pf = max(0.1, min(1.0, float(power_factor)))
     emission_factor = max(0.0, float(grid_emission_factor))
+    deg_stage = max(0.0, float(degradation_stage))
 
     excess_current = max(0.0, actual_i - base_i)
+    if deg_stage > 0.05:
+        parasitic_drag = base_i * 0.04 * min(1.0, deg_stage)
+        excess_current = max(excess_current, parasitic_drag, 0.05)
+
     sqrt3 = math.sqrt(3.0)
 
     excess_power_kw = (sqrt3 * v * excess_current * pf) / 1000.0
@@ -157,6 +169,12 @@ def compute_sustainability_metrics(
         "co2_kg_hr": round(co2_kg_hr, 3),
         "annual_co2_tonnes": round(annual_co2_tonnes, 3),
         "avoidable_waste_percent": round(avoidable_waste_percent, 2),
+        "excess_kw": round(excess_power_kw, 3),
+        "co2_waste_kg_h": round(co2_kg_hr, 3),
+        "avoidable_co2_kg_per_h": round(co2_kg_hr, 3),
+        "annual_penalty_t": round(annual_co2_tonnes, 3),
+        "annual_carbon_waste_tonnes": round(annual_co2_tonnes, 3),
+        "waste_percentage": round(avoidable_waste_percent, 2),
     }
 
 

@@ -145,7 +145,7 @@ export const ExecutiveRibbon: React.FC<ExecutiveRibbonProps> = ({
           </div>
           <div className="flex items-baseline space-x-2 mt-1">
             <span className="text-3xl font-extrabold text-[#061838]">
-              {sustainability?.excess_power_kw?.toFixed(1) ?? '0.0'}
+              {(sustainability?.excess_power_kw ?? sustainability?.excess_kw)?.toFixed(1) ?? '0.0'}
             </span>
             <span className="text-sm font-medium text-slate-400">kW excess</span>
           </div>
@@ -158,13 +158,13 @@ export const ExecutiveRibbon: React.FC<ExecutiveRibbonProps> = ({
           <div>
             <span className="text-slate-400 block text-[10px] uppercase font-medium">CO₂ Waste</span>
             <span className="font-semibold text-slate-700">
-              {sustainability?.avoidable_co2_kg_per_h?.toFixed(2) ?? '0.00'} kg/h
+              {(sustainability?.avoidable_co2_kg_per_h ?? sustainability?.co2_kg_hr ?? sustainability?.co2_waste_kg_h)?.toFixed(2) ?? '0.00'} kg/h
             </span>
           </div>
           <div>
             <span className="text-slate-400 block text-[10px] uppercase font-medium">Annual Penalty</span>
             <span className="font-semibold text-amber-700">
-              {sustainability?.annual_carbon_waste_tonnes?.toFixed(1) ?? '0.0'} t/yr
+              {(sustainability?.annual_carbon_waste_tonnes ?? sustainability?.annual_co2_tonnes ?? sustainability?.annual_penalty_t)?.toFixed(1) ?? '0.0'} t/yr
             </span>
           </div>
         </div>
