@@ -1,0 +1,8 @@
+[application]
+name = "SYNAPSE"
+environment = "development"
+model_version = "unimplemented"
+feature_version = "unimplemented"
+
+[logging]
+level = "INFO"

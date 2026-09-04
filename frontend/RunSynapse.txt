@@ -1,0 +1,4 @@
+cd C:\Users\user\Desktop\workExxson\ExFinal
+uvicorn src.api.main:app --reload --port 8000
+
+npm run dev
