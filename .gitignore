@@ -1,5 +1,4 @@
-@"
-node_modules/
+﻿node_modules/
 .next/
 out/
 __pycache__/
@@ -12,5 +11,3 @@ env/
 .DS_Store
 dist/
 build/
-scratch/
-"@ | Out-File -Encoding utf8 .gitignore
