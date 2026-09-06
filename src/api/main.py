@@ -539,22 +539,7 @@ def get_full_snapshot(
         arena_recommended_action=snapshot.arena.recommended_action,
     )
 
-    # ── Alert state determination — ISA-18.2 Debounce ─────────────────────────
-    if snapshot.persistence_count >= 8 and snapshot.multi_sensor_confirmed:
-        alert_state = "CRITICAL"
-    elif snapshot.persistence_count >= 4:
-        alert_state = "WARNING"
-    else:
-        alert_state = "NORMAL"
-
-    # Enforce NO_ACTION lock if Normal and within dynamic baseline
-    is_nominal = str(snapshot.diagnosis.diagnosis).lower() in ("normal", "ambiguous")
-    if alert_state == "NORMAL" and is_nominal:
-        best_action = "NO_ACTION"
-        # Force cost to 0 to align with $0 direct cost mandate and prevent thrashing
-        for opt in decision_options:
-            if opt["action_id"] == "NO_ACTION":
-                opt["net_expected_loss"] = 0.0
+    alert_state = getattr(snapshot, "alert_state", "NORMAL")
 
     # Multi-sensor confirmation
     devs = health.deviations if health and health.deviations else {}

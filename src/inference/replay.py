@@ -34,6 +34,7 @@ class ReplaySnapshot:
     health_score: Optional[HealthScoreResult] = None
     persistence_count: int = 0
     multi_sensor_confirmed: bool = False
+    alert_state: str = "NORMAL"
 
 
 from functools import lru_cache
@@ -97,36 +98,44 @@ def load_replay_snapshot(
     # A single ambiguous dip drops the count by 1 (floor 0) rather than resetting.
     # To clear a latched alarm, 15 consecutive 'normal' readings are required.
     persistence_count = 0
-    latched_alarm = False
+    alert_state = "NORMAL"
     consecutive_clean = 0
 
     for idx in range(current_index + 1):
         d_result = diagnose(transformed[idx])
         is_fault = d_result.diagnosis not in ("normal", "unknown", "ambiguous")
         
+        # We need a frame-level multi-sensor check for the schmitt trigger
+        f_health = compute_health_score(transformed[idx])
+        f_devs = f_health.deviations if f_health and f_health.deviations else {}
+        f_anomalous = sum(1 for v in f_devs.values() if isinstance(v, (int, float)) and abs(v) > 1.5)
+        f_multi = f_anomalous >= 2
+        
         if is_fault:
             persistence_count = min(30, persistence_count + 1)
             consecutive_clean = 0
         else:
-            # Decrement by at most 1 (leaky integrator)
             persistence_count = max(0, persistence_count - 1)
-            
-            # Count consecutive clean frames
-            if d_result.diagnosis in ("normal", "unknown", "ambiguous"):
-                consecutive_clean += 1
-            else:
-                consecutive_clean = 0
+            consecutive_clean += 1
                 
-        # Escalate to latched alarm state (threshold is 4)
-        if persistence_count >= 4 or multi_sensor_confirmed:
-            latched_alarm = True
-            
-        # De-escalate only after sustained 5 clean frames (ISA-18.2 Hysteresis)
-        if latched_alarm and consecutive_clean >= 5:
-            latched_alarm = False
-            persistence_count = 0
-            multi_sensor_confirmed = False
-
+        # Schmitt Trigger State Machine
+        if alert_state == "NORMAL":
+            if persistence_count >= 8 and f_multi:
+                alert_state = "CRITICAL"
+            elif persistence_count >= 4:
+                alert_state = "WARNING"
+        elif alert_state == "WARNING":
+            if persistence_count <= 1:
+                alert_state = "NORMAL"
+            elif persistence_count >= 8 and f_multi:
+                alert_state = "CRITICAL"
+        elif alert_state == "CRITICAL":
+            if persistence_count <= 4:
+                alert_state = "WARNING"
+            if persistence_count <= 1:
+                alert_state = "NORMAL"
+                
+    latched_alarm = alert_state in ("WARNING", "CRITICAL")
     is_confirmed = latched_alarm
     persistence_fraction = min(1.0, persistence_count / 5.0) if is_confirmed else 0.0
 
@@ -162,6 +171,7 @@ def load_replay_snapshot(
     )
 
     return ReplaySnapshot(
+        alert_state=alert_state,
         observations=tuple(run_observations),
         current_features=current,
         diagnosis=diagnosis,

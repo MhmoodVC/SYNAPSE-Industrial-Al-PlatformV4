@@ -190,12 +190,6 @@ def estimate_remaining_useful_life(
     persistence_count: int = 0,
     multi_sensor_confirmed: bool = False,
 ) -> dict[str, Any]:
-    """Estimate asset Remaining Useful Life (RUL) via degradation velocity dynamics.
-
-    Uses a 15-frame rolling EMA (alpha=0.05) for degradation rate smoothing.
-    Hard physical ceiling: max 2.5 sigma_z / hour.
-    Clamps estimates within realistic operational limits [0.5h, 720.0h].
-    """
     health = float(current_health)
     risk = float(current_risk)
 
@@ -227,8 +221,8 @@ def estimate_remaining_useful_life(
     current_vib_z = vib_z_history[-1] if vib_z_history else 0.0
     current_temp_z = temp_z_history[-1] if temp_z_history else 0.0
 
-    # 1. Dynamic Envelope Guard (Asset Fingerprint)
-    if is_nominal_condition or (current_vib_z < 3.0 and current_temp_z < 3.0):
+    # Strict compliance: If nominal OR persistence < 4, RUL MUST be None and velocity 0.00
+    if is_nominal_condition or (current_vib_z < 3.0 and current_temp_z < 3.0) or persistence_count < 4:
         return {
             "status": "STABLE",
             "rul_hours": None,
@@ -238,10 +232,9 @@ def estimate_remaining_useful_life(
             "confidence": "High",
         }
 
-    # ── Smoothed degradation rate via 15-frame rolling EMA (alpha=0.05) ──────
     _MAX_RATE_SIGMA_PER_HOUR = 2.5
-
     n = len(vib_z_history)
+    
     if n >= 5:
         window = min(15, n - 1)
         alpha = 0.05
@@ -259,12 +252,12 @@ def estimate_remaining_useful_life(
         slope_vib = _ema_slope(vib_z_history)
         slope_temp = _ema_slope(temp_z_history)
 
-        if slope_vib < 0.01 and slope_temp < 0.01:
+        if slope_vib <= 0.01 and slope_temp <= 0.01:
             return {
                 "status": "STABLE",
                 "rul_hours": None,
                 "message": "Asset trajectory recovering or stable — degradation velocity near zero.",
-                "degradation_velocity": max(slope_vib, slope_temp, 0.0),
+                "degradation_velocity": 0.0,
                 "limiting_factor": "None",
                 "confidence": "High" if n >= 20 else "Moderate",
             }
@@ -273,10 +266,15 @@ def estimate_remaining_useful_life(
         slope_temp_pos = slope_temp if slope_temp > 0.01 else None
         confidence = "High" if n >= 20 else "Moderate"
     else:
-        severity = max(0.1, (100.0 - health) / 25.0) * max(0.2, risk)
-        slope_vib_pos = min(_MAX_RATE_SIGMA_PER_HOUR, severity * 0.08)
-        slope_temp_pos = min(_MAX_RATE_SIGMA_PER_HOUR, severity * 0.04)
-        confidence = "Advisory"
+        # Not enough history to form an EMA slope, return STABLE per strict requirements
+        return {
+            "status": "STABLE",
+            "rul_hours": None,
+            "message": "Insufficient data for EMA degradation slope.",
+            "degradation_velocity": 0.0,
+            "limiting_factor": "None",
+            "confidence": "Advisory",
+        }
 
     crit_vib = 4.5
     crit_temp = 4.0
@@ -305,12 +303,6 @@ def estimate_remaining_useful_life(
 
     rul_hours = min(720.0, max(0.5, rul_raw))
     
-    # Suppress instantaneous emergency trips unless persistence is high and confirmed
-    if rul_hours <= 1.0:
-        if persistence_count < 8 or not multi_sensor_confirmed:
-            rul_hours = max(24.0, rul_hours)
-            limiting_factor += " (Transient Suppressed)"
-
     status = "CRITICAL" if rul_hours < 24.0 else "DEGRADING"
 
     return {
