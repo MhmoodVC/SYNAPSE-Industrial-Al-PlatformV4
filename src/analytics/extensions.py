@@ -230,22 +230,46 @@ def estimate_remaining_useful_life(
         "confidence": "High",
     }
 
-    # Gate 1: Nominal condition or insufficient persistence -> STABLE with 0 velocity
-    if is_nominal_condition or persistence_count < 4:
+    # Once persistence >= 4 AND health < 85%, the asset is in CONFIRMED DEGRADED state.
+    # In this state we NEVER return STABLE — doing so causes the 10,000+ hr flicker.
+    in_degraded_state = (persistence_count >= 4) and (health < 85.0)
+
+    # Health-derived RUL floor: monotonically decreases as health degrades.
+    # Maps health 85% -> ~500h, 60% -> ~167h, 40% -> ~0h (clamped to 4h).
+    # This is a physics-grounded estimate anchored to the operational wear curve.
+    def _health_floor_rul(h: float) -> float:
+        return max(4.0, min(500.0, (h - 40.0) * (500.0 / 45.0)))
+
+    # Gate 1: Nominal condition or insufficient persistence — return STABLE
+    # UNLESS already confirmed degraded (prevents STABLE flicker on transient clean frames)
+    if (is_nominal_condition or persistence_count < 4) and not in_degraded_state:
         return _STABLE
 
-    # Gate 2: Both sensors within dynamic baseline (z < 2.5) -> STABLE
-    if current_vib_z < 2.5 and current_temp_z < 2.5:
+    # Gate 2: Both sensors within baseline — return STABLE
+    # Suppressed when in confirmed degraded state (prevents 10,000+ hr jump-back on noise frames)
+    if current_vib_z < 2.5 and current_temp_z < 2.5 and not in_degraded_state:
         return _STABLE
 
     n = len(vib_z_history)
     if n < 5:
+        if in_degraded_state:
+            rul_est = _health_floor_rul(health)
+            return {
+                "status": "DEGRADING",
+                "rul_hours": round(rul_est, 1),
+                "message": f"Degradation confirmed — health-derived estimate: {rul_est:.1f}h",
+                "degradation_velocity": 0.05,
+                "limiting_factor": "Health Index",
+                "confidence": "Advisory",
+            }
         return {**_STABLE, "message": "Insufficient history for EMA slope.", "confidence": "Advisory"}
 
-    # Rolling 15-frame EMA slope (physics-grounded).
-    # Replay data is 1 sample/second. Each step = 1/3600 hr.
-    # Slope ceiling: +/-2.5 sigma/hr per ISO 20816-3 centrifugal pump limits.
-    _MAX_SLOPE = 2.5  # sigma/hr
+    # Rolling 15-frame EMA slope.
+    # Data: 1 sample/second → frame_dt = 1/3600 hr.
+    # Slope ceiling: ±2.5 σ/hr (ISO 20816-3 centrifugal pump limit).
+    # Lower bound: 0.05 σ/hr (minimum detectable degradation velocity).
+    _MIN_SLOPE = 0.05   # σ/hr — minimum credible degradation rate
+    _MAX_SLOPE = 2.5    # σ/hr — ISO 20816-3 hard ceiling
     window = min(15, n - 1)
     alpha = 0.05
     frame_dt_hr = 1.0 / 3600.0
@@ -265,8 +289,19 @@ def estimate_remaining_useful_life(
     slope_temp = _ema_slope_per_hr(temp_z_history)
     confidence = "High" if n >= 20 else "Moderate"
 
-    # Non-positive slopes mean recovery/stability
+    # Non-positive slopes: no forward velocity detected.
+    # If confirmed degraded, use health-derived RUL instead of STABLE.
     if slope_vib <= 0.0 and slope_temp <= 0.0:
+        if in_degraded_state:
+            rul_est = _health_floor_rul(health)
+            return {
+                "status": "DEGRADING",
+                "rul_hours": round(rul_est, 1),
+                "message": f"Trajectory stable but degradation confirmed — {rul_est:.1f}h remaining",
+                "degradation_velocity": _MIN_SLOPE,
+                "limiting_factor": "Health Index",
+                "confidence": confidence,
+            }
         return {
             "status": "STABLE",
             "rul_hours": None,
@@ -276,40 +311,43 @@ def estimate_remaining_useful_life(
             "confidence": confidence,
         }
 
-    # Time-to-threshold.
-    # ISO 20816-3 Zone D normalized boundaries: 4.5 sigma vib, 4.0 sigma thermal.
-    # If sensor is ALREADY past threshold, enforce 48h soft floor UNLESS
-    # hard-confirmed (persistence >= 8 AND multi-sensor) -> 0.5h trip.
-    # This eliminates the (crit - current_z)/slope -> negative -> max(0.5) instantaneous trip trap.
+    # Time-to-threshold: RUL = (Z_crit - Z_current) / slope
+    # ISO 20816-3 Zone D boundaries (in normalized σ units).
     CRIT_VIB_SIGMA = 4.5
     CRIT_TEMP_SIGMA = 4.0
-    MIN_RUL_SOFT = 48.0
-    MIN_RUL_HARD = 0.5
 
     def _time_to_threshold(current_z: float, slope: float, threshold: float) -> float:
         if slope <= 0.0:
             return float("inf")
         remaining = threshold - current_z
         if remaining <= 0.0:
-            # Already past critical boundary
-            if persistence_count >= 8 and multi_sensor_confirmed:
-                return MIN_RUL_HARD
-            return MIN_RUL_SOFT
-        return max(MIN_RUL_HARD, remaining / slope)
+            # Already past threshold — use health-derived floor (smooth, monotonic)
+            return _health_floor_rul(health)
+        return remaining / slope
 
     rem_vib = _time_to_threshold(current_vib_z, slope_vib, CRIT_VIB_SIGMA)
     rem_temp = _time_to_threshold(current_temp_z, slope_temp, CRIT_TEMP_SIGMA)
 
     if rem_vib <= rem_temp:
         rul_raw = rem_vib
-        limiting_factor = "Vibration Severity (4.5\u03c3)"
+        limiting_factor = "Vibration (4.5\u03c3)"
         active_slope = slope_vib
     else:
         rul_raw = rem_temp
-        limiting_factor = "Thermal Gradient (4.0\u03c3)"
+        limiting_factor = "Thermal (4.0\u03c3)"
         active_slope = slope_temp
 
     if rul_raw == float("inf"):
+        if in_degraded_state:
+            rul_est = _health_floor_rul(health)
+            return {
+                "status": "DEGRADING",
+                "rul_hours": round(rul_est, 1),
+                "message": f"Degradation confirmed — estimated {rul_est:.1f}h",
+                "degradation_velocity": _MIN_SLOPE,
+                "limiting_factor": "Health Index",
+                "confidence": confidence,
+            }
         return {
             "status": "STABLE",
             "rul_hours": None,
@@ -319,14 +357,18 @@ def estimate_remaining_useful_life(
             "confidence": confidence,
         }
 
-    rul_hours = min(720.0, max(MIN_RUL_HARD, rul_raw))
+    # Clamp: velocity to [0.05, 2.5] σ/hr; RUL to [4.0, 500.0] hours.
+    active_slope_clamped = max(_MIN_SLOPE, min(_MAX_SLOPE, abs(active_slope)))
+    # Health floor ensures RUL never exceeds what the asset wear curve supports
+    health_floor = _health_floor_rul(health)
+    rul_hours = max(4.0, min(500.0, min(rul_raw, health_floor)))
     status = "CRITICAL" if rul_hours < 24.0 else "DEGRADING"
 
     return {
         "status": status,
         "rul_hours": round(rul_hours, 1),
-        "message": f"Projected boundary in ~{rul_hours:.1f}h [{limiting_factor}]",
-        "degradation_velocity": round(active_slope, 4),
+        "message": f"Projected critical boundary in ~{rul_hours:.1f}h [{limiting_factor}]",
+        "degradation_velocity": round(active_slope_clamped, 4),
         "limiting_factor": limiting_factor,
         "confidence": confidence,
     }

@@ -543,27 +543,37 @@ def get_full_snapshot(
     health_score_val = health.health_score if health else 100.0
     p_count = snapshot.persistence_count
 
-    # ── ISO 20816 / API 670 3-Tier Safety Interlock ──────────────────────────
-    # Health gating takes absolute precedence over the Schmitt-trigger state.
-    # This guarantees Zone D assets are never held in DE_RATE when health < 60%.
-    if health_score_val < 60.0 or (p_count >= 8 and snapshot.multi_sensor_confirmed):
-        # Tier 1: ISO Zone D / API 670 Trip — IMMEDIATE_MAINTENANCE mandatory
+    # Vibration z-score from current features for direct ISO 20816 Zone D check
+    vib_z_current = float(features.get("vibration_robust_z") or 0.0)
+
+    # ── ISO 20816 / API 670 Physical-Threshold-First 3-Tier Lifecycle ─────────
+    # Tier 1 CRITICAL: Strict physical criteria ONLY.
+    #   - Health < 60%  (ISO Zone D — mechanical integrity compromised)
+    #   - OR vibration z >= 4.5  (ISO 20816-3 Zone D absolute trip limit)
+    # Persistence alone NEVER triggers CRITICAL. A pump at 86% health with
+    # persistence=10 is still mechanically sound and must stay on DE_RATE.
+    if health_score_val < 60.0 or vib_z_current >= 4.5:
         alert_state = "CRITICAL"
         best_action = "IMMEDIATE_MAINTENANCE"
-    elif health_score_val < 80.0 or p_count >= 4:
-        # Tier 2: ISO Zone C / Incipient Fault — DE_RATE to restore NPSH margin
+    # Tier 2 WARNING: Incipient degradation / Zone C operation.
+    #   - Health between 60% and 85%  (degraded but mechanically viable)
+    #   - OR persistence >= 4  (sustained anomaly pattern detected)
+    # Pump MUST remain on DERATE throughout this zone.
+    elif health_score_val < 85.0 or p_count >= 4:
         alert_state = "WARNING"
         best_action = "DERATE_THROTTLE"
+    # Tier 3 NORMAL: ISO Zone A/B — healthy baseline operation.
     else:
-        # Tier 3: ISO Zone A/B / Nominal — NO_ACTION
         alert_state = "NORMAL"
         best_action = "NO_ACTION"
 
-    # Synchronize is_recommended badge across all decision_options dicts
+    # Synchronize is_recommended badge — exactly ONE card holds True
     for opt in decision_options:
-        opt_id = opt.get("action_id", "")
-        opt_name = opt.get("name", "")
-        opt["is_recommended"] = (opt_id == best_action or opt_name == best_action)
+        opt["is_recommended"] = (
+            opt.get("action_id", "") == best_action or
+            opt.get("name", "") == best_action
+        )
+
 
     # Multi-sensor confirmation
     devs = health.deviations if health and health.deviations else {}
