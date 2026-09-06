@@ -29,16 +29,44 @@ def assess_risk(
     persistence: float = 0.0,
     operating_load: float = 0.0,
     severity: float = 0.0,
+    persistence_count: Optional[int] = None,
+    multi_sensor_confirmed: Optional[bool] = None,
+    latched_alarm: bool = False,
 ) -> RiskAssessment:
     """Calculate bounded, explainable risk from explicit normalized inputs.
 
     The score is a simulation/configuration score, not a failure probability.
     """
+    is_fault = diagnosis.diagnosis not in ("normal", "unknown", "ambiguous")
+    
+    # Universal Alarm State Machine Hysteresis:
+    # If the system is in a LATCHED_ALARM state, any transient ambiguous/normal 
+    # step is promoted to a latched fault to preserve the elevated risk governance.
+    if latched_alarm:
+        is_fault = True
+
+    is_confirmed_fault = is_fault
+    if is_fault and persistence_count is not None:
+        # If latched_alarm is true, we consider it confirmed.
+        if persistence_count < 3 and not multi_sensor_confirmed and not latched_alarm:
+            is_confirmed_fault = False
+
+    # For latched (promoted) ambiguous steps, use a conservative support floor
+    if latched_alarm and is_confirmed_fault:
+        latched_confidence = max(0.50, _bounded((persistence_count or 3) / 30.0))
+        fault_support = latched_confidence
+        fault_severity = latched_confidence * 0.6
+        fault_persistence = _bounded(persistence)
+    else:
+        fault_support = _bounded(diagnosis.confidence or 0.0) if is_confirmed_fault else 0.0
+        fault_severity = _bounded(severity) if is_confirmed_fault else 0.0
+        fault_persistence = _bounded(persistence) if is_confirmed_fault else 0.0
+
     values = {
-        "diagnostic_support": _bounded(diagnosis.confidence or 0.0),
-        "persistence": _bounded(persistence),
+        "diagnostic_support": fault_support,
+        "persistence": fault_persistence,
         "operating_load": _bounded(operating_load),
-        "severity": _bounded(severity),
+        "severity": fault_severity,
     }
     weights = {
         "diagnostic_support": 0.40,
@@ -47,10 +75,10 @@ def assess_risk(
         "severity": 0.20,
     }
     reasons = {
-        "diagnostic_support": "diagnostic support increased risk",
-        "persistence": "abnormal behavior persisted",
+        "diagnostic_support": "diagnostic support increased risk" if is_confirmed_fault else "nominal diagnosis indicates low risk",
+        "persistence": "abnormal behavior persisted" if is_confirmed_fault else "nominal persistence indicates low risk",
         "operating_load": "operating load increased exposure",
-        "severity": "scenario severity increased",
+        "severity": "scenario severity increased" if is_confirmed_fault else "nominal operating severity",
     }
     contributions = tuple(
         RiskContribution(name, values[name], weights[name], values[name] * weights[name], reasons[name])
@@ -59,6 +87,7 @@ def assess_risk(
     score = min(1.0, sum(item.weighted_value for item in contributions))
     level = "critical" if score >= 0.75 else "warning" if score >= 0.40 else "normal"
     return RiskAssessment(score, level, contributions, diagnosis.review_required)
+
 
 
 def _bounded(value: float) -> float:

@@ -164,7 +164,7 @@ def build_decision_arena(
             "load de-rate to 75% recommended to arrest degradation velocity."
         ) if not latched_alarm else (
             "ALARM STATE LATCHED: Minimum governance intervention is De-rate / Throttle "
-            "until formal sustained clearing (8 strictly normal readings)."
+            "until formal sustained clearing (5 strictly normal readings)."
         )
         human_approval = False
     else:

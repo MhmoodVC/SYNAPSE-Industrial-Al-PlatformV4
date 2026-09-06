@@ -32,6 +32,30 @@ class ReplaySnapshot:
     arena: DecisionArena
     guardrails: GuardrailResult
     health_score: Optional[HealthScoreResult] = None
+    persistence_count: int = 0
+    multi_sensor_confirmed: bool = False
+
+
+from functools import lru_cache
+
+@lru_cache(maxsize=8)
+def _get_parsed_dataset(path_str: str) -> Tuple[Tuple[Any, ...], Tuple[Any, ...]]:
+    obs, truth = load_synthetic_csv(Path(path_str))
+    return tuple(obs), tuple(truth)
+
+
+@lru_cache(maxsize=128)
+def _get_run_data_and_baseline(path_str: str, run_id: str) -> Tuple[Tuple[Any, ...], BaselineProfile]:
+    obs, truth = _get_parsed_dataset(path_str)
+    selected = tuple(obs[i] for i, item in enumerate(truth) if item.run_id == run_id)
+    if not selected:
+        raise ValueError(f"unknown run: {run_id}")
+    training_indices = [index for index, item in enumerate(truth) if item.fault_type == "normal" and item.run_id != run_id]
+    if not training_indices:
+        training_indices = [index for index, item in enumerate(truth) if item.run_id != run_id]
+    training = [obs[index] for index in training_indices]
+    baseline = BaselineProfile.fit(training)
+    return selected, baseline
 
 
 def load_replay_snapshot(
@@ -52,32 +76,68 @@ def load_replay_snapshot(
     Returns:
         Fully hydrated, immutable ReplaySnapshot instance.
     """
-    observations, truth = load_synthetic_csv(path)
-    selected_indices = [index for index, item in enumerate(truth) if item.run_id == run_id]
-    if not selected_indices:
-        raise ValueError(f"unknown run: {run_id}")
-
-    training_indices = [index for index, item in enumerate(truth) if item.fault_type == "normal" and item.run_id != run_id]
-    if not training_indices:
-        training_indices = [index for index, item in enumerate(truth) if item.run_id != run_id]
-
-    training = [observations[index] for index in training_indices]
-    run_observations = [observations[index] for index in selected_indices]
+    run_observations, baseline = _get_run_data_and_baseline(str(path.resolve()), run_id)
     current_index = min(max(0, row_index), len(run_observations) - 1)
 
-    # Compute baseline profile once for both feature transformation and evidence derivation
-    baseline = BaselineProfile.fit(training)
-
-    # Transform historical sequence up to current step
-    current = transform_records(training + run_observations[: current_index + 1], baseline)[-1]
+    # Transform historical sequence up to current step with baseline profile
+    transformed = transform_records(run_observations[: current_index + 1], baseline)
+    current = transformed[-1]
     diagnosis = diagnose(current)
-    
-    persistence = min(1.0, (current_index + 1) / max(1, len(run_observations)))
+
+    # Compute causal degradation proxy / health score
+    active_records = run_observations[: current_index + 1]
+    health = compute_health_score(active_records) if len(active_records) >= 10 else None
+
+    # Compute multi-sensor confirmation from robust deviations
+    devs = health.deviations if health and health.deviations else {}
+    anomalous_sensors = sum(1 for v in devs.values() if isinstance(v, (int, float)) and abs(v) > 1.5)
+    multi_sensor_confirmed = anomalous_sensors >= 2
+
+    # True Leaky Integrator & Universal Alarm State Machine (Forward Pass)
+    # A single ambiguous dip drops the count by 1 (floor 0) rather than resetting.
+    # To clear a latched alarm, 15 consecutive 'normal' readings are required.
+    persistence_count = 0
+    latched_alarm = False
+    consecutive_clean = 0
+
+    for idx in range(current_index + 1):
+        d_result = diagnose(transformed[idx])
+        is_fault = d_result.diagnosis not in ("normal", "unknown", "ambiguous")
+        
+        if is_fault:
+            persistence_count = min(30, persistence_count + 1)
+            consecutive_clean = 0
+        else:
+            # Decrement by at most 1 (leaky integrator)
+            persistence_count = max(0, persistence_count - 1)
+            
+            # Count consecutive clean frames
+            if d_result.diagnosis in ("normal", "unknown", "ambiguous"):
+                consecutive_clean += 1
+            else:
+                consecutive_clean = 0
+                
+        # Escalate to latched alarm state (threshold is 4)
+        if persistence_count >= 4 or multi_sensor_confirmed:
+            latched_alarm = True
+            
+        # De-escalate only after sustained 5 clean frames (ISA-18.2 Hysteresis)
+        if latched_alarm and consecutive_clean >= 5:
+            latched_alarm = False
+            persistence_count = 0
+            multi_sensor_confirmed = False
+
+    is_confirmed = latched_alarm
+    persistence_fraction = min(1.0, persistence_count / 5.0) if is_confirmed else 0.0
+
     risk = assess_risk(
         diagnosis,
-        persistence=persistence,
+        persistence=persistence_fraction,
         operating_load=float(current["operating_load"]),
         severity=diagnosis.confidence or 0.0,
+        persistence_count=persistence_count,
+        multi_sensor_confirmed=multi_sensor_confirmed,
+        latched_alarm=latched_alarm,
     )
     evidence = build_evidence_card(
         current,
@@ -87,7 +147,12 @@ def load_replay_snapshot(
         run_id=run_id,
         pump_id=str(current["pump_id"]),
     )
-    arena = build_decision_arena(diagnosis, risk, operating_load=float(current["operating_load"]))
+    arena = build_decision_arena(
+        diagnosis, 
+        risk, 
+        operating_load=float(current["operating_load"]),
+        latched_alarm=latched_alarm
+    )
     context = GuardrailContext(diagnostic_confidence=diagnosis.confidence)
     guardrails = evaluate_guardrails(
         action,
@@ -95,10 +160,6 @@ def load_replay_snapshot(
         diagnosis_review_required=diagnosis.review_required,
         context=context,
     )
-
-    # Compute causal degradation proxy / health score
-    active_records = run_observations[: current_index + 1]
-    health = compute_health_score(active_records) if len(active_records) >= 10 else None
 
     return ReplaySnapshot(
         observations=tuple(run_observations),
@@ -109,4 +170,6 @@ def load_replay_snapshot(
         arena=arena,
         guardrails=guardrails,
         health_score=health,
+        persistence_count=persistence_count,
+        multi_sensor_confirmed=multi_sensor_confirmed,
     )

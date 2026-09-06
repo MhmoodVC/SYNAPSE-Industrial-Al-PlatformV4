@@ -446,6 +446,8 @@ def get_prognostics(
         current_health=snapshot.health_score.health_score if snapshot.health_score else 100.0,
         current_risk=snapshot.risk.score,
         condition=snapshot.diagnosis.diagnosis,
+        persistence_count=snapshot.persistence_count,
+        multi_sensor_confirmed=snapshot.multi_sensor_confirmed,
     )
 
 
@@ -521,6 +523,8 @@ def get_full_snapshot(
         current_health=health.health_score if health else 100.0,
         current_risk=risk.score,
         condition=snapshot.diagnosis.diagnosis,
+        persistence_count=snapshot.persistence_count,
+        multi_sensor_confirmed=snapshot.multi_sensor_confirmed,
     )
     scaled_arena = compute_sensitivity_costs(
         snapshot.arena,
@@ -536,37 +540,21 @@ def get_full_snapshot(
     )
 
     # ── Alert state determination — ISA-18.2 Debounce ─────────────────────────
-    # State transitions require 4+ consecutive matching frames:
-    # - HUMAN_REVIEW is never shown while a latch is active.
-    # - Persistence count acts as the debounce counter.
-    raw_level = risk.level.upper() if risk else "NORMAL"
-
-    if raw_level in ("CRITICAL", "HIGH") or risk.score >= 0.75:
-        raw_alert = "CRITICAL"
-    elif raw_level in ("WARNING", "MEDIUM") or risk.score >= 0.40:
-        raw_alert = "WARNING"
-    elif snapshot.diagnosis.review_required and not snapshot.persistence_count >= 3:
-        # Only emit HUMAN_REVIEW if NOT latched — latched state always shows WARNING or CRITICAL
-        raw_alert = "HUMAN_REVIEW"
+    if snapshot.persistence_count >= 8 and snapshot.multi_sensor_confirmed:
+        alert_state = "CRITICAL"
+    elif snapshot.persistence_count >= 4:
+        alert_state = "WARNING"
     else:
-        raw_alert = "NORMAL"
+        alert_state = "NORMAL"
 
-    # ISA-18.2: require 4 consecutive matching frames (persistence_count proxy)
-    # If persistence_count < 4 and raw_alert would ESCALATE, hold current state.
-    # If persistence_count >= 3 (latched), suppress HUMAN_REVIEW and NORMAL downgrades.
-    is_latched = snapshot.persistence_count >= 3
-    if is_latched:
-        # Latched: minimum alert is WARNING, never show HUMAN_REVIEW or NORMAL
-        if raw_alert in ("HUMAN_REVIEW", "NORMAL"):
-            alert_state = "WARNING"
-        else:
-            alert_state = raw_alert
-    else:
-        # Not latched: require 4 frames before escalating from NORMAL
-        if raw_alert in ("CRITICAL", "WARNING") and snapshot.persistence_count < 4:
-            alert_state = "NORMAL"
-        else:
-            alert_state = raw_alert
+    # Enforce NO_ACTION lock if Normal and within dynamic baseline
+    is_nominal = str(snapshot.diagnosis.diagnosis).lower() in ("normal", "ambiguous")
+    if alert_state == "NORMAL" and is_nominal:
+        best_action = "NO_ACTION"
+        # Force cost to 0 to align with $0 direct cost mandate and prevent thrashing
+        for opt in decision_options:
+            if opt["action_id"] == "NO_ACTION":
+                opt["net_expected_loss"] = 0.0
 
     # Multi-sensor confirmation
     devs = health.deviations if health and health.deviations else {}

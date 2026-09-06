@@ -1,7 +1,4 @@
-"""Machine-readable fault signatures and domain knowledge."""
-
 from dataclasses import dataclass
-
 
 @dataclass(frozen=True)
 class FaultSignature:
@@ -11,8 +8,8 @@ class FaultSignature:
     likely_cause: str
     candidate_actions: tuple[str, ...]
     guardrails: tuple[str, ...]
+    signs: dict[str, int] = None
     inverted: bool = False
-
 
 FAULT_KNOWLEDGE: dict[str, FaultSignature] = {
     "normal": FaultSignature(
@@ -28,23 +25,26 @@ FAULT_KNOWLEDGE: dict[str, FaultSignature] = {
         "Equipment operating within nominal design envelope",
         ("continue normal operation", "routine monitoring"),
         ("maintain baseline operating envelope",),
+        signs={},
         inverted=True,
     ),
     "cavitation": FaultSignature(
         "cavitation",
-        ("vibration_robust_z", "pressure_rolling_std", "flow_rolling_std"),
-        {"vibration_robust_z": 0.4, "pressure_rolling_std": 0.3, "flow_rolling_std": 0.3},
+        ("vibration_robust_z", "pressure_robust_z", "flow_robust_z"),
+        {"vibration_robust_z": 0.6, "pressure_robust_z": 0.2, "flow_robust_z": 0.2},
         "Poor suction pressure (NPSH margin deficit) or hydraulic recirculation",
         ("de-rate", "inspect suction conditions", "clear suction strainer"),
         ("verify safe operating bounds", "confirm hydraulic evidence"),
+        signs={"pressure_robust_z": -1, "vibration_robust_z": 1},
     ),
     "bearing_degradation": FaultSignature(
         "bearing_degradation",
         ("vibration_robust_z", "temperature_robust_z"),
-        {"vibration_robust_z": 0.7, "temperature_robust_z": 0.3},
+        {"vibration_robust_z": 0.6, "temperature_robust_z": 0.4},
         "Mechanical wear or lubrication breakdown affecting the bearing assembly",
         ("de-rate if safe", "schedule inspection", "vibration analysis"),
         ("verify vibration evidence", "check maintenance feasibility"),
+        signs={"vibration_robust_z": 1, "temperature_robust_z": 1},
     ),
     "seal_leakage": FaultSignature(
         "seal_leakage",
@@ -53,6 +53,7 @@ FAULT_KNOWLEDGE: dict[str, FaultSignature] = {
         "Mechanical seal degradation, packing failure, or casing gasket leak",
         ("inspect seal", "schedule maintenance", "check seal flush lines"),
         ("confirm pressure and flow quality", "check maintenance feasibility"),
+        signs={"pressure_robust_z": -1, "flow_robust_z": -1},
     ),
     "overheating": FaultSignature(
         "overheating",
@@ -61,14 +62,16 @@ FAULT_KNOWLEDGE: dict[str, FaultSignature] = {
         "Cooling system blockage, ambient overheating, or excessive thermal load",
         ("reduce load", "inspect cooling", "verify thermal limits"),
         ("verify thermal operating limits",),
+        signs={"temperature_robust_z": 1},
     ),
     "flow_restriction": FaultSignature(
         "flow_restriction",
-        ("flow_robust_z", "pressure_flow_ratio"),
-        {"flow_robust_z": 0.6, "pressure_flow_ratio": 0.4},
+        ("flow_robust_z", "pressure_robust_z", "motor_current_robust_z"),
+        {"flow_robust_z": 0.4, "pressure_robust_z": 0.4, "motor_current_robust_z": 0.2},
         "Discharge piping obstruction, closed discharge valve, or sediment clogging",
         ("inspect flow path", "de-rate if safe", "verify valve positions"),
         ("confirm process impact",),
+        signs={"flow_robust_z": -1, "pressure_robust_z": 1, "motor_current_robust_z": -1},
     ),
     "pressure_loss": FaultSignature(
         "pressure_loss",
@@ -77,6 +80,7 @@ FAULT_KNOWLEDGE: dict[str, FaultSignature] = {
         "Hydraulic pressure loss, line breach, or upstream supply pressure loss",
         ("inspect hydraulic path", "monitor trend", "isolate leaking section"),
         ("verify pressure sensor quality",),
+        signs={"pressure_robust_z": -1, "flow_robust_z": 1},
     ),
     "motor_overload": FaultSignature(
         "motor_overload",
@@ -85,14 +89,16 @@ FAULT_KNOWLEDGE: dict[str, FaultSignature] = {
         "Excessive mechanical load, low supply voltage, or winding deterioration",
         ("de-rate if safe", "inspect motor and load", "verify electrical limits"),
         ("verify electrical limits", "confirm safe operating bounds"),
+        signs={"motor_current_robust_z": 1, "temperature_robust_z": 1, "vibration_robust_z": 1},
     ),
     "sensor_drift": FaultSignature(
         "sensor_drift",
-        ("pressure_robust_z", "flow_pressure_delta_diff"),
-        {"pressure_robust_z": 0.6, "flow_pressure_delta_diff": 0.4},
+        ("pressure_robust_z", "temperature_robust_z"),
+        {"pressure_robust_z": 0.8, "temperature_robust_z": 0.2},
         "Sensor calibration drift, zero-shift, or signal transmitter degradation without hydraulic change",
         ("recalibrate pressure transmitter", "cross-verify with manual pressure gauge"),
         ("verify sensor quality flag", "do not trip process on suspected sensor fault"),
+        signs={},
     ),
     "progressive_degradation": FaultSignature(
         "progressive_degradation",
@@ -101,6 +107,7 @@ FAULT_KNOWLEDGE: dict[str, FaultSignature] = {
         "Multi-component progressive wear (impeller erosion, bearing fatigue, seal wear)",
         ("monitor trend", "schedule inspection", "plan maintenance"),
         ("confirm persistence", "check maintenance feasibility"),
+        signs={"temperature_robust_z": 1, "vibration_robust_z": 1, "pressure_robust_z": -1},
     ),
     "sudden_failure": FaultSignature(
         "sudden_failure",
@@ -109,5 +116,6 @@ FAULT_KNOWLEDGE: dict[str, FaultSignature] = {
         "Catastrophic mechanical seizure, coupling failure, or impeller detachment",
         ("emergency stop", "isolate pump", "inspect physical pump assembly"),
         ("lock out tag out", "verify zero energy state"),
+        signs={"vibration_robust_z": 1, "pressure_robust_z": -1},
     ),
 }

@@ -198,7 +198,7 @@ def _generate_run(
                 pump_id=pump_id,
                 fault_type=scenario,
                 severity=severity if active else 0.0,
-                degradation_stage=severity if scenario in ("bearing_degradation", "progressive_degradation") else 0.0,
+                degradation_stage=severity if active else 0.0,
                 event_start=event_start if scenario != "normal" else None,
                 event_end=event_end if scenario != "normal" else None,
                 failure_flag=scenario == "sudden_failure" and point == points_per_run - 1,
@@ -223,41 +223,84 @@ def _apply_fault(
 ) -> tuple[float, float, float, float, float, float]:
     if not active or scenario == "normal":
         return pressure, flow, temperature, vibration, current, drift
+
+    # Base noise amplitude for severe instability
+    instability = abs(random_state.gauss(0, 0.15)) * severity
+    
     if scenario == "cavitation":
-        pressure -= 0.12 * severity
-        flow -= 3.0 * severity
-        vibration += 0.75 * severity + abs(random_state.gauss(0, 0.12))
+        # Strict thermodynamic coupling: 
+        # Large pressure drop (suction loss), flow drops and becomes unstable, vibration spikes violently
+        pressure -= 1.8 * severity + instability * 2  # Deep pressure drop
+        flow -= 8.0 * severity + instability * 15     # Flow severely unstable
+        vibration += 1.8 * severity + instability * 3 # Very high frequency noise
+        temperature += 0.5 * severity # Slight thermal coupling from recirculation
+        
     elif scenario == "bearing_degradation":
-        vibration += 1.15 * severity
-        temperature += 3.0 * severity
+        # Mechanical friction -> Heat conversion
+        # Strictly separate from cavitation: pressure/flow remain mostly nominal
+        vibration += 1.3 * severity 
+        # Friction -> Heat mapping (exponentially accelerating at high severity)
+        temperature += 4.5 * severity + 2.0 * severity**2
+        current += 0.3 * severity # Slight efficiency loss
+        
     elif scenario == "seal_leakage":
-        pressure -= 0.65 * severity
-        flow -= 3.5 * severity
+        # Pressure drops moderately, flow drops moderately, no vibration spike
+        pressure -= 0.8 * severity
+        flow -= 4.0 * severity
+        
     elif scenario == "overheating":
-        temperature += 18.0 * severity
-        current += 0.5 * severity
+        # Thermal ramp purely from cooling failure or ambient
+        temperature += 15.0 * severity + 5.0 * severity**2
+        current += 0.4 * severity
+        
     elif scenario == "flow_restriction":
-        flow -= 7.0 * severity
-        pressure += 0.25 * severity
-        current += 0.9 * severity
+        # Blocked discharge: Head (pressure) increases sharply, Flow drops sharply, Motor current drops (less work)
+        pressure += 1.4 * severity
+        flow -= 12.0 * severity
+        current -= 1.5 * severity # Affinity laws: lower Q means lower shaft power P
+        vibration += 0.2 * severity # Slight turbulent vibration
+        
     elif scenario == "pressure_loss":
-        pressure -= 1.0 * severity
-        flow -= 1.8 * severity
+        # Downstream rupture: Pressure drops completely, flow increases rapidly
+        pressure -= 2.2 * severity
+        flow += 9.0 * severity
+        current += 1.2 * severity # More flow = more work = more current
+        
     elif scenario == "motor_overload":
-        current += 3.8 * severity
-        temperature += 7.0 * severity
-        vibration += 0.3 * severity
+        # Pure electrical/torque overload
+        current += 4.5 * severity + 1.0 * severity**2
+        temperature += 8.0 * severity
+        vibration += 0.4 * severity
+        
     elif scenario == "sensor_drift":
-        drift += 0.018
+        # Strictly artificial drift on one sensor without physical coupling
+        drift += 0.025
         pressure += drift
+        
     elif scenario == "progressive_degradation":
-        pressure -= 0.35 * severity
-        flow -= 2.0 * severity
-        temperature += 5.0 * severity
-        vibration += 0.5 * severity
-    elif scenario == "sudden_failure" and severity > 0.85:
-        pressure *= 0.3
-        flow *= 0.2
-        vibration += 2.5
-        current *= 0.45
+        # Multi-axis wear
+        pressure -= 0.5 * severity
+        flow -= 3.0 * severity
+        temperature += 6.0 * severity
+        vibration += 0.6 * severity
+        current += 0.5 * severity
+        
+    elif scenario == "sudden_failure":
+        if severity > 0.85:
+            # Instantaneous catastrophic state (shaft break, seizure)
+            pressure = 0.5 + instability
+            flow = 0.5 + instability
+            vibration = 4.0 + instability * 5
+            current = 0.0
+        else:
+            # Pre-failure noise
+            vibration += 0.2 * severity
+
+    # Enforce strict positive physical bounds
+    pressure = max(0.01, pressure)
+    flow = max(0.01, flow)
+    temperature = max(15.0, temperature)
+    vibration = max(0.01, vibration)
+    current = max(0.0, current)
+
     return pressure, flow, temperature, vibration, current, drift

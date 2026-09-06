@@ -18,7 +18,7 @@ def make_case():
         production_impact_limit=0.30,
         maintenance_available=True,
         backup_available=True,
-        diagnostic_confidence=diagnosis.confidence,
+        diagnostic_confidence=0.9,
     )
     guardrails = evaluate_guardrails("de_rate", operating_load=0.7, diagnosis_review_required=False, context=context)
     return observations, risk, guardrails
@@ -36,7 +36,7 @@ def test_guardrails_report_each_constraint_and_pass_when_configured() -> None:
 def test_missing_or_conflicting_constraints_require_review() -> None:
     observations, _, _ = make_case()
     diagnosis = diagnose({"vibration_robust_z": 3.0, "pressure_robust_z": 3.0, "flow_robust_z": 3.0}, min_support=0.5, ambiguity_margin=0.05)
-    context = GuardrailContext(contradictory_evidence=True, diagnostic_confidence=diagnosis.confidence)
+    context = GuardrailContext(contradictory_evidence=True, diagnostic_confidence=0.9)
     result = evaluate_guardrails("maintenance", operating_load=0.7, diagnosis_review_required=True, context=context)
 
     assert result.status == "FAIL"

@@ -187,11 +187,13 @@ def estimate_remaining_useful_life(
     current_health: float,
     current_risk: float,
     condition: Optional[str] = None,
+    persistence_count: int = 0,
+    multi_sensor_confirmed: bool = False,
 ) -> dict[str, Any]:
     """Estimate asset Remaining Useful Life (RUL) via degradation velocity dynamics.
 
     Uses a 15-frame rolling EMA (alpha=0.05) for degradation rate smoothing.
-    Hard physical ceiling: max 5.0 sigma_z / hour.
+    Hard physical ceiling: max 2.5 sigma_z / hour.
     Clamps estimates within realistic operational limits [0.5h, 720.0h].
     """
     health = float(current_health)
@@ -206,18 +208,6 @@ def estimate_remaining_useful_life(
 
     is_nominal_condition = str(condition).lower() in ("normal", "ambiguous") if condition else False
 
-    # 1. Stable asset condition check
-    if (health >= 90.0 and risk < 0.20) or (health >= 90.0 and is_nominal_condition):
-        return {
-            "status": "STABLE",
-            "rul_hours": None,
-            "message": "Asset Nominal - Stable Lifecycle",
-            "degradation_velocity": 0.0,
-            "limiting_factor": "None",
-            "confidence": "High",
-        }
-
-    # Extract historical trajectories
     vib_z_history: list[float] = []
     temp_z_history: list[float] = []
 
@@ -234,59 +224,60 @@ def estimate_remaining_useful_life(
         except (ValueError, TypeError):
             continue
 
-    current_vib_z = vib_z_history[-1] if vib_z_history else 2.5
-    current_temp_z = temp_z_history[-1] if temp_z_history else 1.5
+    current_vib_z = vib_z_history[-1] if vib_z_history else 0.0
+    current_temp_z = temp_z_history[-1] if temp_z_history else 0.0
+
+    # 1. Dynamic Envelope Guard (Asset Fingerprint)
+    if is_nominal_condition or (current_vib_z < 3.0 and current_temp_z < 3.0):
+        return {
+            "status": "STABLE",
+            "rul_hours": None,
+            "message": "Asset operating nominally within dynamic baseline envelope.",
+            "degradation_velocity": 0.0,
+            "limiting_factor": "None",
+            "confidence": "High",
+        }
 
     # ── Smoothed degradation rate via 15-frame rolling EMA (alpha=0.05) ──────
-    # Using EMA prevents single-frame noise spikes from producing extreme slopes.
-    # Hard physical ceiling: max 5.0 sigma_z / hour (industrial pump benchmark).
-    _MAX_RATE_SIGMA_PER_HOUR = 5.0
+    _MAX_RATE_SIGMA_PER_HOUR = 2.5
 
     n = len(vib_z_history)
     if n >= 5:
         window = min(15, n - 1)
-        alpha = 0.05  # EMA smoothing factor
-        # 1 Hz sampling => each sample is 1/3600 hours
+        alpha = 0.05
         frame_dt_hours = 1.0 / 3600.0
 
         def _ema_slope(series: list[float]) -> float:
-            """EMA of per-frame first-differences, converted to sigma/hour."""
             start = max(0, len(series) - window - 1)
             diffs = [series[i + 1] - series[i] for i in range(start, len(series) - 1)]
-            if not diffs:
-                return 0.0
+            if not diffs: return 0.0
             ema = diffs[0]
-            for d in diffs[1:]:
-                ema = alpha * d + (1.0 - alpha) * ema
-            # Clamp to physical ceiling before returning
+            for d in diffs[1:]: ema = alpha * d + (1.0 - alpha) * ema
             rate = ema / frame_dt_hours
             return max(-_MAX_RATE_SIGMA_PER_HOUR, min(_MAX_RATE_SIGMA_PER_HOUR, rate))
 
         slope_vib = _ema_slope(vib_z_history)
         slope_temp = _ema_slope(temp_z_history)
 
-        # Recovering or flat trajectory — stable, no finite RUL
-        if slope_vib <= 0 and slope_temp <= 0:
+        if slope_vib < 0.01 and slope_temp < 0.01:
             return {
                 "status": "STABLE",
                 "rul_hours": None,
-                "message": "Asset trajectory recovering — degradation velocity is non-positive.",
-                "degradation_velocity": 0.0,
+                "message": "Asset trajectory recovering or stable — degradation velocity near zero.",
+                "degradation_velocity": max(slope_vib, slope_temp, 0.0),
                 "limiting_factor": "None",
                 "confidence": "High" if n >= 20 else "Moderate",
             }
 
-        slope_vib_pos = slope_vib if slope_vib > 0 else None
-        slope_temp_pos = slope_temp if slope_temp > 0 else None
+        slope_vib_pos = slope_vib if slope_vib > 0.01 else None
+        slope_temp_pos = slope_temp if slope_temp > 0.01 else None
         confidence = "High" if n >= 20 else "Moderate"
     else:
-        # Fallback velocity proportional to health degradation index
         severity = max(0.1, (100.0 - health) / 25.0) * max(0.2, risk)
         slope_vib_pos = min(_MAX_RATE_SIGMA_PER_HOUR, severity * 0.08)
         slope_temp_pos = min(_MAX_RATE_SIGMA_PER_HOUR, severity * 0.04)
         confidence = "Advisory"
 
-    # Critical thresholds: Vibration z-score 4.5 sigma; Temperature z-score 4.0 sigma
     crit_vib = 4.5
     crit_temp = 4.0
 
@@ -306,14 +297,20 @@ def estimate_remaining_useful_life(
         return {
             "status": "STABLE",
             "rul_hours": None,
-            "message": "Asset trajectory recovering — no degrading sensor detected.",
+            "message": "Asset trajectory stable — no degrading sensor detected.",
             "degradation_velocity": 0.0,
             "limiting_factor": "None",
             "confidence": confidence,
         }
 
-    # Bounded RUL clamp [0.5h, 720.0h]
     rul_hours = min(720.0, max(0.5, rul_raw))
+    
+    # Suppress instantaneous emergency trips unless persistence is high and confirmed
+    if rul_hours <= 1.0:
+        if persistence_count < 8 or not multi_sensor_confirmed:
+            rul_hours = max(24.0, rul_hours)
+            limiting_factor += " (Transient Suppressed)"
+
     status = "CRITICAL" if rul_hours < 24.0 else "DEGRADING"
 
     return {
@@ -324,8 +321,6 @@ def estimate_remaining_useful_life(
         "limiting_factor": limiting_factor,
         "confidence": confidence,
     }
-
-
 def calculate_enterprise_roi(
     annual_failures_baseline: int = 4,
     avg_reactive_incident_cost: float = 45000.0,
