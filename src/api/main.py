@@ -93,9 +93,13 @@ def _get_raw_dataset():
     return _RAW_DATASET_CACHE
 
 
-@lru_cache(maxsize=4096)
+@lru_cache(maxsize=256)
 def _get_snapshot(run_id: str, row_index: int, action: str = DEFAULT_ACTION) -> ReplaySnapshot:
-    """Retrieve or compute a cached snapshot of all diagnostic and decision layers."""
+    """Retrieve or compute a cached snapshot of all diagnostic and decision layers.
+
+    maxsize=256 bounds worst-case memory to ~50 MB (256 × 1,000 obs × ~200 B),
+    covering a typical scrubbing session without unbounded RAM growth.
+    """
     return load_replay_snapshot(DATA_PATH, run_id=run_id, row_index=row_index, action=action)
 
 
@@ -159,19 +163,17 @@ def _extract_baseline_motor_current(snapshot: ReplaySnapshot) -> float:
 def _format_decision_options(
     scaled_arena: Sequence[Any],
     arena_human_approval_required: bool,
+    arena_recommended_action: str,
 ) -> Tuple[str, List[Dict[str, Any]]]:
-    """Format decision options and identify best recommendation based on expected loss."""
-    best_action = "NO_ACTION"
-    min_loss = float("inf")
+    """Format decision options and pass through the strictly enforced safety recommendation."""
     formatted_options: List[Dict[str, Any]] = []
+
+    best_action = ACTION_ID_MAP.get(str(arena_recommended_action).lower(), str(arena_recommended_action).upper())
 
     for opt in scaled_arena:
         action_key = str(opt.action).lower()
         action_id = ACTION_ID_MAP.get(action_key, action_key.upper())
         est_cost = round(opt.estimated_cost, 2)
-        if est_cost < min_loss:
-            min_loss = est_cost
-            best_action = action_id
 
         direct_c = ACTION_DIRECT_COST_MAP.get(action_key, 0.0)
         post_l = ACTION_POST_LOAD_MAP.get(action_key, 1.0)
@@ -187,6 +189,8 @@ def _format_decision_options(
             "net_expected_loss": est_cost,
             "requires_human_approval": action_key == "maintenance" or arena_human_approval_required,
             "justification": opt.rationale,
+            "disqualified": getattr(opt, "disqualified", False),
+            "disqualification_reason": getattr(opt, "disqualification_reason", ""),
         })
 
     return best_action, formatted_options
@@ -412,6 +416,7 @@ def evaluate_decision_arena(req: DecisionArenaRequest) -> Dict[str, Any]:
     best_action, formatted_options = _format_decision_options(
         scaled,
         arena_human_approval_required=snapshot.arena.human_approval_required,
+        arena_recommended_action=snapshot.arena.recommended_action,
     )
 
     return {
@@ -435,10 +440,12 @@ def get_prognostics(
         raise HTTPException(status_code=500, detail="Persisted dataset not found")
     target_idx = step if step is not None else (row_index if row_index is not None else DEFAULT_STEP_INDEX)
     snapshot = _get_snapshot(run_id=run_id, row_index=target_idx)
+    recent_obs = list(snapshot.observations[max(0, target_idx - 29): target_idx + 1])
     return estimate_remaining_useful_life(
-        [snapshot.current_features],
+        recent_obs,
         current_health=snapshot.health_score.health_score if snapshot.health_score else 100.0,
         current_risk=snapshot.risk.score,
+        condition=snapshot.diagnosis.diagnosis,
     )
 
 
@@ -453,7 +460,8 @@ def get_sustainability(
         raise HTTPException(status_code=500, detail="Persisted dataset not found")
     target_idx = step if step is not None else (row_index if row_index is not None else DEFAULT_STEP_INDEX)
     snapshot = _get_snapshot(run_id=run_id, row_index=target_idx)
-    actual_i = float(snapshot.current_features.get("motor_current", DEFAULT_BASELINE_MOTOR_CURRENT))
+    raw_i = snapshot.current_features.get("motor_current")
+    actual_i = float(raw_i if raw_i is not None else DEFAULT_BASELINE_MOTOR_CURRENT)
     base_i = _extract_baseline_motor_current(snapshot)
 
     health_deg = max(0.0, (100.0 - float(snapshot.health_score.health_score)) / 100.0) if snapshot.health_score else 0.0
@@ -491,7 +499,8 @@ def get_full_snapshot(
     risk = snapshot.risk
     history_slice = snapshot.observations[max(0, target_idx - 30): target_idx + 1]
 
-    actual_i = float(features.get("motor_current", DEFAULT_BASELINE_MOTOR_CURRENT))
+    raw_i = features.get("motor_current")
+    actual_i = float(raw_i if raw_i is not None else DEFAULT_BASELINE_MOTOR_CURRENT)
     base_i = _extract_baseline_motor_current(snapshot)
 
     health_deg = max(0.0, (100.0 - float(health.health_score)) / 100.0) if health else 0.0
@@ -499,15 +508,19 @@ def get_full_snapshot(
     deg_stage = max(health_deg, risk_deg * 0.5)
 
     # Domain analytics computations
+    # Pass the last 30 raw observations so estimate_remaining_useful_life can compute
+    # a real historical slope (n >= 5 path) rather than the single-record fallback.
+    recent_obs = list(snapshot.observations[max(0, target_idx - 29): target_idx + 1])
     sustain = compute_sustainability_metrics(
         actual_current=actual_i,
         baseline_median_current=base_i,
         degradation_stage=deg_stage,
     )
     prognostics = estimate_remaining_useful_life(
-        [features],
+        recent_obs,
         current_health=health.health_score if health else 100.0,
         current_risk=risk.score,
+        condition=snapshot.diagnosis.diagnosis,
     )
     scaled_arena = compute_sensitivity_costs(
         snapshot.arena,
@@ -519,16 +532,41 @@ def get_full_snapshot(
     best_action, decision_options = _format_decision_options(
         scaled_arena,
         arena_human_approval_required=snapshot.arena.human_approval_required,
+        arena_recommended_action=snapshot.arena.recommended_action,
     )
 
-    # Alert state determination
-    alert_state = "NORMAL"
-    if risk.level.upper() in ["CRITICAL", "HIGH"] or risk.score >= 0.7:
-        alert_state = "CRITICAL"
-    elif risk.level.upper() in ["WARNING", "MEDIUM"] or risk.score >= 0.35:
-        alert_state = "WARNING"
-    elif snapshot.diagnosis.review_required:
-        alert_state = "HUMAN_REVIEW"
+    # ── Alert state determination — ISA-18.2 Debounce ─────────────────────────
+    # State transitions require 4+ consecutive matching frames:
+    # - HUMAN_REVIEW is never shown while a latch is active.
+    # - Persistence count acts as the debounce counter.
+    raw_level = risk.level.upper() if risk else "NORMAL"
+
+    if raw_level in ("CRITICAL", "HIGH") or risk.score >= 0.75:
+        raw_alert = "CRITICAL"
+    elif raw_level in ("WARNING", "MEDIUM") or risk.score >= 0.40:
+        raw_alert = "WARNING"
+    elif snapshot.diagnosis.review_required and not snapshot.persistence_count >= 3:
+        # Only emit HUMAN_REVIEW if NOT latched — latched state always shows WARNING or CRITICAL
+        raw_alert = "HUMAN_REVIEW"
+    else:
+        raw_alert = "NORMAL"
+
+    # ISA-18.2: require 4 consecutive matching frames (persistence_count proxy)
+    # If persistence_count < 4 and raw_alert would ESCALATE, hold current state.
+    # If persistence_count >= 3 (latched), suppress HUMAN_REVIEW and NORMAL downgrades.
+    is_latched = snapshot.persistence_count >= 3
+    if is_latched:
+        # Latched: minimum alert is WARNING, never show HUMAN_REVIEW or NORMAL
+        if raw_alert in ("HUMAN_REVIEW", "NORMAL"):
+            alert_state = "WARNING"
+        else:
+            alert_state = raw_alert
+    else:
+        # Not latched: require 4 frames before escalating from NORMAL
+        if raw_alert in ("CRITICAL", "WARNING") and snapshot.persistence_count < 4:
+            alert_state = "NORMAL"
+        else:
+            alert_state = raw_alert
 
     # Multi-sensor confirmation
     devs = health.deviations if health and health.deviations else {}
@@ -550,8 +588,8 @@ def get_full_snapshot(
         "row_index": target_idx,
         "health_score": round(health.health_score, 1) if health else 100.0,
         "alert_state": alert_state,
-        "persistence_count": min(target_idx + 1, 15 if alert_state != "NORMAL" else 0),
-        "multi_sensor_confirmed": multi_sensor,
+        "persistence_count": snapshot.persistence_count,
+        "multi_sensor_confirmed": snapshot.multi_sensor_confirmed,
         "recommended_action": best_action,
         "decision_options": decision_options,
         "evidence_card": {
