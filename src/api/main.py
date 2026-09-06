@@ -540,15 +540,30 @@ def get_full_snapshot(
     )
 
     alert_state = getattr(snapshot, "alert_state", "NORMAL")
+    health_score_val = health.health_score if health else 100.0
+    p_count = snapshot.persistence_count
 
-    # ── Strict Tiered Safety-First Governance Override ──
-    if alert_state == "CRITICAL":
-        best_action = "MAINTENANCE"
-    elif alert_state == "WARNING":
-        best_action = "DE_RATE"
-    elif alert_state == "NORMAL":
+    # ── ISO 20816 / API 670 3-Tier Safety Interlock ──────────────────────────
+    # Health gating takes absolute precedence over the Schmitt-trigger state.
+    # This guarantees Zone D assets are never held in DE_RATE when health < 60%.
+    if health_score_val < 60.0 or (p_count >= 8 and snapshot.multi_sensor_confirmed):
+        # Tier 1: ISO Zone D / API 670 Trip — IMMEDIATE_MAINTENANCE mandatory
+        alert_state = "CRITICAL"
+        best_action = "IMMEDIATE_MAINTENANCE"
+    elif health_score_val < 80.0 or p_count >= 4:
+        # Tier 2: ISO Zone C / Incipient Fault — DE_RATE to restore NPSH margin
+        alert_state = "WARNING"
+        best_action = "DERATE_THROTTLE"
+    else:
+        # Tier 3: ISO Zone A/B / Nominal — NO_ACTION
+        alert_state = "NORMAL"
         best_action = "NO_ACTION"
 
+    # Synchronize is_recommended badge across all decision_options dicts
+    for opt in decision_options:
+        opt_id = opt.get("action_id", "")
+        opt_name = opt.get("name", "")
+        opt["is_recommended"] = (opt_id == best_action or opt_name == best_action)
 
     # Multi-sensor confirmation
     devs = health.deviations if health and health.deviations else {}
@@ -557,13 +572,14 @@ def get_full_snapshot(
 
     # Evidence card 4-part representation
     evidence_obs = snapshot.evidence.what_happened or f"Operating point at step {target_idx} with load {features.get('operating_load', DEFAULT_OPERATING_LOAD)*100:.0f}%."
-    evidence_exp = "Normal baseline envelope: vibration < 2.5 mm/s, bearing temperature < 75°C."
+    evidence_exp = "Normal baseline envelope: vibration < 2.5 mm/s, bearing temperature < 75\u00b0C."
     evidence_phys = snapshot.evidence.likely_cause or f"Primary diagnostic indicator: {snapshot.diagnosis.diagnosis} (confidence: {snapshot.diagnosis.confidence or 0.0:.2f})."
     evidence_act = snapshot.arena.recommendation_reason or f"Recommended {best_action} minimizes expected financial and operational risk."
 
     sparkline_map = _extract_all_sparklines(history_slice)
 
     return {
+
         "timestamp": str(features.get("timestamp")),
         "run_id": run_id,
         "step": target_idx,

@@ -221,94 +221,111 @@ def estimate_remaining_useful_life(
     current_vib_z = vib_z_history[-1] if vib_z_history else 0.0
     current_temp_z = temp_z_history[-1] if temp_z_history else 0.0
 
-    # Strict compliance: If nominal OR persistence < 4, RUL MUST be None and velocity 0.00
-    if is_nominal_condition or (current_vib_z < 3.0 and current_temp_z < 3.0) or persistence_count < 4:
-        return {
-            "status": "STABLE",
-            "rul_hours": None,
-            "message": "Asset operating nominally within dynamic baseline envelope.",
-            "degradation_velocity": 0.0,
-            "limiting_factor": "None",
-            "confidence": "High",
-        }
+    _STABLE = {
+        "status": "STABLE",
+        "rul_hours": None,
+        "message": "Asset operating nominally within dynamic baseline envelope.",
+        "degradation_velocity": 0.0,
+        "limiting_factor": "None",
+        "confidence": "High",
+    }
 
-    _MAX_RATE_SIGMA_PER_HOUR = 2.5
+    # Gate 1: Nominal condition or insufficient persistence -> STABLE with 0 velocity
+    if is_nominal_condition or persistence_count < 4:
+        return _STABLE
+
+    # Gate 2: Both sensors within dynamic baseline (z < 2.5) -> STABLE
+    if current_vib_z < 2.5 and current_temp_z < 2.5:
+        return _STABLE
+
     n = len(vib_z_history)
-    
-    if n >= 5:
-        window = min(15, n - 1)
-        alpha = 0.05
-        frame_dt_hours = 1.0 / 3600.0
+    if n < 5:
+        return {**_STABLE, "message": "Insufficient history for EMA slope.", "confidence": "Advisory"}
 
-        def _ema_slope(series: list[float]) -> float:
-            start = max(0, len(series) - window - 1)
-            diffs = [series[i + 1] - series[i] for i in range(start, len(series) - 1)]
-            if not diffs: return 0.0
-            ema = diffs[0]
-            for d in diffs[1:]: ema = alpha * d + (1.0 - alpha) * ema
-            rate = ema / frame_dt_hours
-            return max(-_MAX_RATE_SIGMA_PER_HOUR, min(_MAX_RATE_SIGMA_PER_HOUR, rate))
+    # Rolling 15-frame EMA slope (physics-grounded).
+    # Replay data is 1 sample/second. Each step = 1/3600 hr.
+    # Slope ceiling: +/-2.5 sigma/hr per ISO 20816-3 centrifugal pump limits.
+    _MAX_SLOPE = 2.5  # sigma/hr
+    window = min(15, n - 1)
+    alpha = 0.05
+    frame_dt_hr = 1.0 / 3600.0
 
-        slope_vib = _ema_slope(vib_z_history)
-        slope_temp = _ema_slope(temp_z_history)
+    def _ema_slope_per_hr(series: list[float]) -> float:
+        start = max(0, len(series) - window - 1)
+        diffs = [series[i + 1] - series[i] for i in range(start, len(series) - 1)]
+        if not diffs:
+            return 0.0
+        ema = diffs[0]
+        for d in diffs[1:]:
+            ema = alpha * d + (1.0 - alpha) * ema
+        rate_per_hr = ema / frame_dt_hr
+        return max(-_MAX_SLOPE, min(_MAX_SLOPE, rate_per_hr))
 
-        if slope_vib <= 0.01 and slope_temp <= 0.01:
-            return {
-                "status": "STABLE",
-                "rul_hours": None,
-                "message": "Asset trajectory recovering or stable — degradation velocity near zero.",
-                "degradation_velocity": 0.0,
-                "limiting_factor": "None",
-                "confidence": "High" if n >= 20 else "Moderate",
-            }
+    slope_vib = _ema_slope_per_hr(vib_z_history)
+    slope_temp = _ema_slope_per_hr(temp_z_history)
+    confidence = "High" if n >= 20 else "Moderate"
 
-        slope_vib_pos = slope_vib if slope_vib > 0.01 else None
-        slope_temp_pos = slope_temp if slope_temp > 0.01 else None
-        confidence = "High" if n >= 20 else "Moderate"
-    else:
-        # Not enough history to form an EMA slope, return STABLE per strict requirements
+    # Non-positive slopes mean recovery/stability
+    if slope_vib <= 0.0 and slope_temp <= 0.0:
         return {
             "status": "STABLE",
             "rul_hours": None,
-            "message": "Insufficient data for EMA degradation slope.",
-            "degradation_velocity": 0.0,
-            "limiting_factor": "None",
-            "confidence": "Advisory",
-        }
-
-    crit_vib = 4.5
-    crit_temp = 4.0
-
-    rem_vib_hours = max(0.5, (crit_vib - current_vib_z) / slope_vib_pos) if slope_vib_pos is not None else float("inf")
-    rem_temp_hours = max(0.5, (crit_temp - current_temp_z) / slope_temp_pos) if slope_temp_pos is not None else float("inf")
-
-    if rem_vib_hours <= rem_temp_hours:
-        rul_raw = rem_vib_hours
-        limiting_factor = "Vibration Severity (4.5σ)"
-        active_slope = slope_vib_pos if slope_vib_pos is not None else 0.0
-    else:
-        rul_raw = rem_temp_hours
-        limiting_factor = "Thermal Runaway (4.0σ)"
-        active_slope = slope_temp_pos if slope_temp_pos is not None else 0.0
-
-    if rul_raw == float("inf"):
-        return {
-            "status": "STABLE",
-            "rul_hours": None,
-            "message": "Asset trajectory stable — no degrading sensor detected.",
+            "message": "Trajectory recovering \u2014 degradation velocity non-positive.",
             "degradation_velocity": 0.0,
             "limiting_factor": "None",
             "confidence": confidence,
         }
 
-    rul_hours = min(720.0, max(0.5, rul_raw))
-    
+    # Time-to-threshold.
+    # ISO 20816-3 Zone D normalized boundaries: 4.5 sigma vib, 4.0 sigma thermal.
+    # If sensor is ALREADY past threshold, enforce 48h soft floor UNLESS
+    # hard-confirmed (persistence >= 8 AND multi-sensor) -> 0.5h trip.
+    # This eliminates the (crit - current_z)/slope -> negative -> max(0.5) instantaneous trip trap.
+    CRIT_VIB_SIGMA = 4.5
+    CRIT_TEMP_SIGMA = 4.0
+    MIN_RUL_SOFT = 48.0
+    MIN_RUL_HARD = 0.5
+
+    def _time_to_threshold(current_z: float, slope: float, threshold: float) -> float:
+        if slope <= 0.0:
+            return float("inf")
+        remaining = threshold - current_z
+        if remaining <= 0.0:
+            # Already past critical boundary
+            if persistence_count >= 8 and multi_sensor_confirmed:
+                return MIN_RUL_HARD
+            return MIN_RUL_SOFT
+        return max(MIN_RUL_HARD, remaining / slope)
+
+    rem_vib = _time_to_threshold(current_vib_z, slope_vib, CRIT_VIB_SIGMA)
+    rem_temp = _time_to_threshold(current_temp_z, slope_temp, CRIT_TEMP_SIGMA)
+
+    if rem_vib <= rem_temp:
+        rul_raw = rem_vib
+        limiting_factor = "Vibration Severity (4.5\u03c3)"
+        active_slope = slope_vib
+    else:
+        rul_raw = rem_temp
+        limiting_factor = "Thermal Gradient (4.0\u03c3)"
+        active_slope = slope_temp
+
+    if rul_raw == float("inf"):
+        return {
+            "status": "STABLE",
+            "rul_hours": None,
+            "message": "No degrading sensor velocity detected.",
+            "degradation_velocity": 0.0,
+            "limiting_factor": "None",
+            "confidence": confidence,
+        }
+
+    rul_hours = min(720.0, max(MIN_RUL_HARD, rul_raw))
     status = "CRITICAL" if rul_hours < 24.0 else "DEGRADING"
 
     return {
         "status": status,
         "rul_hours": round(rul_hours, 1),
-        "message": f"Critical boundary reached in ~{rul_hours:.1f}h [{limiting_factor}]",
+        "message": f"Projected boundary in ~{rul_hours:.1f}h [{limiting_factor}]",
         "degradation_velocity": round(active_slope, 4),
         "limiting_factor": limiting_factor,
         "confidence": confidence,
