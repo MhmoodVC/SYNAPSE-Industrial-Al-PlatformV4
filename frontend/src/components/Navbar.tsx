@@ -114,6 +114,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 max={Math.max(1, maxStep - 1)}
                 value={currentStep}
                 onChange={(e) => onStepChange(parseInt(e.target.value, 10))}
+                onInput={(e) => onStepChange(parseInt((e.target as HTMLInputElement).value, 10))}
                 className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-[#061838]"
               />
               <span className="text-xs font-mono font-medium text-slate-400">

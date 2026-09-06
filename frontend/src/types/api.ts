@@ -59,11 +59,13 @@ export interface DecisionResponse {
 }
 
 export interface PrognosticsResult {
-  rul_hours: number;
+  rul_hours: number | null;
   degradation_velocity: number;
   limiting_factor: string;
-  confidence: number;
-  z_current: number;
+  confidence: number | string;
+  z_current?: number;
+  status?: string;
+  message?: string;
 }
 
 export interface SustainabilityMetrics {

@@ -45,19 +45,8 @@ export const DecisionArena: React.FC<DecisionArenaProps> = ({
     });
   }, [options, riskTolerance, hourlyDowntimeCost]);
 
-  // Dynamically calculate recommended action based on minimum loss
-  const activeRecommended = useMemo(() => {
-    if (!displayOptions || displayOptions.length === 0) return recommendedAction;
-    let minLoss = Infinity;
-    let bestId = recommendedAction;
-    for (const opt of displayOptions) {
-      if (opt.net_expected_loss < minLoss) {
-        minLoss = opt.net_expected_loss;
-        bestId = opt.action_id;
-      }
-    }
-    return bestId;
-  }, [displayOptions, recommendedAction]);
+  // Strictly use backend recommended action to preserve safety overrides
+  const activeRecommended = recommendedAction;
 
   const getActionIcon = (actionId: string) => {
     switch (actionId) {

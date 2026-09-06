@@ -1,15 +1,108 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Navbar, RunOption } from '@/components/Navbar';
 import { ExecutiveRibbon } from '@/components/ExecutiveRibbon';
 import { DecisionArena } from '@/components/DecisionArena';
 import { TelemetryGrid } from '@/components/TelemetryGrid';
 import { DeepMathDrawer } from '@/components/DeepMathDrawer';
-import { SnapshotResponse, TimelineResponse } from '@/types/api';
+import { SnapshotResponse, TimelineResponse, TelemetryRecord, DecisionOption } from '@/types/api';
 import { AlertCircle, RefreshCw, CheckCircle2, AlertTriangle, ShieldAlert } from 'lucide-react';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
+/**
+ * Authoritative Initial Snapshot Baseline.
+ * Strictly aligned with FastAPI backend schema, constants, and baseline values.
+ * Decommissions heuristic client-side mock overrides to eliminate divergent data source flickering.
+ */
+const INITIAL_SNAPSHOT: SnapshotResponse = {
+  run_id: 'run-0001',
+  step: 0,
+  health_score: 100.0,
+  alert_state: 'NORMAL',
+  persistence_count: 0,
+  multi_sensor_confirmed: false,
+  recommended_action: 'NO_ACTION',
+  decision_options: [
+    {
+      action_id: 'NO_ACTION',
+      name: 'No Action',
+      direct_cost: 0.0,
+      risk_score: 0.082,
+      failure_probability: 0.082,
+      post_action_load: 1.0,
+      net_expected_loss: 529.3,
+      requires_human_approval: true,
+      justification: 'Dynamic risk loss at $500/hr downtime (tolerance: 0.8x, effective risk: 0.082)',
+    },
+    {
+      action_id: 'DERATE_THROTTLE',
+      name: 'De-rate / Throttle',
+      direct_cost: 250.0,
+      risk_score: 0.066,
+      failure_probability: 0.053,
+      post_action_load: 0.75,
+      net_expected_loss: 1014.2,
+      requires_human_approval: true,
+      justification: 'Throttled production saves $0.00 vs No Action at $500/hr',
+    },
+    {
+      action_id: 'IMMEDIATE_MAINTENANCE',
+      name: 'Immediate Maintenance / Shutdown',
+      direct_cost: 1400.0,
+      risk_score: 0.041,
+      failure_probability: 0.0,
+      post_action_load: 0.0,
+      net_expected_loss: 1401.2,
+      requires_human_approval: true,
+      justification: 'Planned maintenance saves $0.00 vs catastrophic breakdown',
+    },
+  ],
+  evidence_card: {
+    observation: 'Baseline operations detected across all channels.',
+    expected: 'Normal baseline envelope: vibration < 2.5 mm/s, bearing temperature < 75°C.',
+    physics_interpretation: 'Dynamic hydro-mechanical equilibrium verified by robust Z-score.',
+    action_rationale: 'Recommended NO_ACTION minimizes expected financial and operational risk.',
+  },
+  telemetry: {
+    timestamp: '2025-01-01T00:00:00Z',
+    run_id: 'run-0001',
+    step: 0,
+    pressure: 8.52,
+    flow: 120.3,
+    temperature: 68.0,
+    vibration: 1.25,
+    motor_current: 9.88,
+    operating_load: 0.57,
+    pressure_history: [8.52],
+    flow_history: [120.3],
+    temperature_history: [68.0],
+    vibration_history: [1.25],
+    motor_current_history: [9.88],
+  },
+  guardrails: {
+    approved: true,
+    human_in_the_loop_required: false,
+    safety_envelope_violated: false,
+    notes: 'Operating parameters within safety envelope',
+  },
+  prognostics: {
+    status: 'STABLE',
+    rul_hours: null,
+    message: 'Asset Nominal - Stable Lifecycle',
+    degradation_velocity: 0.0,
+    limiting_factor: 'None',
+    confidence: 'High',
+  },
+  sustainability: {
+    excess_power_kw: 0.0,
+    avoidable_co2_kg_per_h: 0.0,
+    annual_carbon_waste_tonnes: 0.0,
+    waste_percentage: 0.0,
+  },
+};
+
 
 export default function Home() {
   const [runOptions, setRunOptions] = useState<RunOption[]>([
@@ -35,6 +128,7 @@ export default function Home() {
   const snapshotAbortRef = useRef<AbortController | null>(null);
   const decisionAbortRef = useRef<AbortController | null>(null);
   const isInitialMount = useRef<boolean>(true);
+  const snapshotCacheRef = useRef<Map<string, SnapshotResponse>>(new Map());
 
   // 1. Initial hydration: Discover runs and timeline metadata across all 11 fault classes
   useEffect(() => {
@@ -78,7 +172,7 @@ export default function Home() {
     initTimeline();
   }, []);
 
-  // 2. Fetch snapshot for current state with AbortController
+  // 2. Fetch snapshot for current state with AbortController and instant cache memoization
   const fetchSnapshot = useCallback(async (run: string, step: number, risk: number, cost: number) => {
     if (snapshotAbortRef.current) {
       snapshotAbortRef.current.abort();
@@ -91,6 +185,13 @@ export default function Home() {
       const res = await fetch(url, { signal: controller.signal });
       if (res.ok) {
         const data: SnapshotResponse = await res.json();
+        const cacheKey = `${data.run_id}:${data.step}:${risk}:${cost}`;
+        // LRU eviction: keep at most 200 entries to prevent unbounded memory growth
+        if (snapshotCacheRef.current.size >= 200) {
+          const oldestKey = snapshotCacheRef.current.keys().next().value;
+          if (oldestKey !== undefined) snapshotCacheRef.current.delete(oldestKey);
+        }
+        snapshotCacheRef.current.set(cacheKey, data);
         setSnapshot(data);
         setBackendConnected(true);
       } else {
@@ -105,7 +206,7 @@ export default function Home() {
     }
   }, []);
 
-  // 3. 250ms Debounced Fetch Effect on slider adjustments
+  // 3. Fast 80ms Debounced Fetch Effect on slider adjustments
   useEffect(() => {
     if (isInitialMount.current) {
       isInitialMount.current = false;
@@ -120,7 +221,7 @@ export default function Home() {
 
     const debounceTimer = setTimeout(() => {
       fetchSnapshot(selectedRun, currentStep, riskTolerance, hourlyDowntimeCost);
-    }, 250);
+    }, 80);
 
     return () => {
       clearTimeout(debounceTimer);
@@ -187,8 +288,31 @@ export default function Home() {
     }
   };
 
+  const activeRunOption = runOptions.find((r) => r.id === selectedRun);
+
+  // Active Frame Resolution:
+  // Standardized strictly on authoritative backend snapshots with instant cache hits
+  // and smooth in-flight step retention to eliminate divergent mock flickering.
+  const activeFrame: SnapshotResponse = useMemo(() => {
+    const cacheKey = `${selectedRun}:${currentStep}:${riskTolerance}:${hourlyDowntimeCost}`;
+    const cached = snapshotCacheRef.current.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+    if (snapshot) {
+      if (snapshot.run_id === selectedRun) {
+        return {
+          ...snapshot,
+          step: currentStep,
+        };
+      }
+      return snapshot;
+    }
+    return INITIAL_SNAPSHOT;
+  }, [snapshot, selectedRun, currentStep, riskTolerance, hourlyDowntimeCost]);
+
   // Plain-English Recommendation details
-  const recommendedAction = snapshot?.recommended_action ?? 'NO_ACTION';
+  const recommendedAction = activeFrame.recommended_action;
   const getRecommendationDetails = (action: string) => {
     switch (action) {
       case 'DERATE_THROTTLE':
@@ -223,7 +347,6 @@ export default function Home() {
   };
 
   const rec = getRecommendationDetails(recommendedAction);
-  const activeRunOption = runOptions.find((r) => r.id === selectedRun);
 
   return (
     <div className="min-h-screen flex flex-col bg-[#F8FAFC]">
@@ -232,6 +355,10 @@ export default function Home() {
         runs={runOptions}
         selectedRun={selectedRun}
         onSelectRun={(runId) => {
+          // Immediately clear stale data so INITIAL_SNAPSHOT shows during the 80ms debounce
+          // rather than the previous run's metrics bleeding through.
+          setSnapshot(null);
+          snapshotCacheRef.current.clear();
           setSelectedRun(runId);
           setCurrentStep(0);
           fetchSnapshot(runId, 0, riskTolerance, hourlyDowntimeCost);
@@ -245,8 +372,8 @@ export default function Home() {
           setCurrentStep(0);
           fetchSnapshot(selectedRun, 0, riskTolerance, hourlyDowntimeCost);
         }}
-        healthScore={snapshot?.health_score ?? 98.5}
-        alertState={snapshot?.alert_state ?? 'NORMAL'}
+        healthScore={activeFrame.health_score}
+        alertState={activeFrame.alert_state}
       />
 
       {/* Backend Disconnected Banner (if applicable) */}
@@ -323,35 +450,13 @@ export default function Home() {
 
           {/* Executive Ribbon (Donut, Alerts, ESG Tracker w/ SDG 12 & 13, RUL Prognostics) */}
           <ExecutiveRibbon
-            healthScore={snapshot?.health_score ?? 98.5}
-            alertState={snapshot?.alert_state ?? 'NORMAL'}
-            persistenceCount={snapshot?.persistence_count ?? 0}
-            multiSensorConfirmed={snapshot?.multi_sensor_confirmed ?? false}
-            guardrails={
-              snapshot?.guardrails ?? {
-                approved: true,
-                human_in_the_loop_required: false,
-                safety_envelope_violated: false,
-                notes: 'Nominal',
-              }
-            }
-            prognostics={
-              snapshot?.prognostics ?? {
-                rul_hours: 9999,
-                degradation_velocity: 0.0001,
-                limiting_factor: 'Bearing Dynamic',
-                confidence: 0.95,
-                z_current: 0.4,
-              }
-            }
-            sustainability={
-              snapshot?.sustainability ?? {
-                excess_power_kw: 0.0,
-                avoidable_co2_kg_per_h: 0.0,
-                annual_carbon_waste_tonnes: 0.0,
-                waste_percentage: 0.0,
-              }
-            }
+            healthScore={activeFrame.health_score}
+            alertState={activeFrame.alert_state}
+            persistenceCount={activeFrame.persistence_count}
+            multiSensorConfirmed={activeFrame.multi_sensor_confirmed}
+            guardrails={activeFrame.guardrails}
+            prognostics={activeFrame.prognostics}
+            sustainability={activeFrame.sustainability}
           />
         </section>
 
@@ -361,44 +466,8 @@ export default function Home() {
         <section className="space-y-6 pt-2">
           {/* Decision Arena (3-Option Trade-off Evaluation + Sensitivity Sliders) */}
           <DecisionArena
-            options={
-              snapshot?.decision_options ?? [
-                {
-                  action_id: 'NO_ACTION',
-                  name: 'No Action (Continue Run)',
-                  direct_cost: 0,
-                  risk_score: 0.05,
-                  failure_probability: 0.02,
-                  post_action_load: 1.0,
-                  net_expected_loss: 450,
-                  requires_human_approval: false,
-                  justification: 'Vibration and thermal signatures are within nominal bounds.',
-                },
-                {
-                  action_id: 'DERATE_THROTTLE',
-                  name: 'De-rate / Throttle Output',
-                  direct_cost: 1200,
-                  risk_score: 0.02,
-                  failure_probability: 0.01,
-                  post_action_load: 0.75,
-                  net_expected_loss: 1450,
-                  requires_human_approval: false,
-                  justification: 'Reduces dynamic stress while sustaining 75% flow rate.',
-                },
-                {
-                  action_id: 'IMMEDIATE_MAINTENANCE',
-                  name: 'Immediate Maintenance / Shutdown',
-                  direct_cost: 5000,
-                  risk_score: 0.0,
-                  failure_probability: 0.0,
-                  post_action_load: 0.0,
-                  net_expected_loss: 5000,
-                  requires_human_approval: true,
-                  justification: 'Eliminates catastrophic failure risk; incurs planned turnaround downtime.',
-                },
-              ]
-            }
-            recommendedAction={recommendedAction}
+            options={activeFrame.decision_options}
+            recommendedAction={activeFrame.recommended_action}
             riskTolerance={riskTolerance}
             onRiskToleranceChange={(val) => setRiskTolerance(val)}
             hourlyDowntimeCost={hourlyDowntimeCost}
@@ -408,24 +477,7 @@ export default function Home() {
 
           {/* Telemetry Stream & Sparkline Grid (5 Sensor Channels) */}
           <TelemetryGrid
-            telemetry={
-              snapshot?.telemetry ?? {
-                timestamp: new Date().toISOString(),
-                run_id: selectedRun,
-                step: currentStep,
-                vibration: 1.25,
-                motor_current: 45.2,
-                temperature: 68.4,
-                pressure: 8.52,
-                flow: 120.3,
-                operating_load: 1.0,
-                vibration_history: [1.2, 1.22, 1.21, 1.24, 1.25],
-                motor_current_history: [45.0, 45.1, 45.3, 45.2, 45.2],
-                temperature_history: [68.1, 68.2, 68.3, 68.3, 68.4],
-                pressure_history: [8.55, 8.54, 8.52, 8.51, 8.52],
-                flow_history: [120.5, 120.4, 120.2, 120.3, 120.3],
-              }
-            }
+            telemetry={activeFrame.telemetry}
           />
         </section>
 
@@ -434,23 +486,9 @@ export default function Home() {
         {/* ================================================================= */}
         <section className="pt-2">
           <DeepMathDrawer
-            evidenceCard={
-              snapshot?.evidence_card ?? {
-                observation: 'Baseline operations detected across all channels.',
-                expected: 'Vibration RMS < 2.5 mm/s, Bearing Temp < 75°C.',
-                physics_interpretation: 'Dynamic hydro-mechanical equilibrium verified by robust Z-score.',
-                action_rationale: 'Cost-minimizing policy is NO_ACTION given low failure probability.',
-              }
-            }
-            guardrails={
-              snapshot?.guardrails ?? {
-                approved: true,
-                human_in_the_loop_required: false,
-                safety_envelope_violated: false,
-                notes: 'Operating inside approved safe envelope.',
-              }
-            }
-            alertState={snapshot?.alert_state ?? 'NORMAL'}
+            evidenceCard={activeFrame.evidence_card}
+            guardrails={activeFrame.guardrails}
+            alertState={activeFrame.alert_state}
           />
         </section>
       </main>
