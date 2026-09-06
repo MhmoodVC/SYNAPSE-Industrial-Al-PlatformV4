@@ -541,6 +541,15 @@ def get_full_snapshot(
 
     alert_state = getattr(snapshot, "alert_state", "NORMAL")
 
+    # ── Strict Tiered Safety-First Governance Override ──
+    if alert_state == "CRITICAL":
+        best_action = "MAINTENANCE"
+    elif alert_state == "WARNING":
+        best_action = "DE_RATE"
+    elif alert_state == "NORMAL":
+        best_action = "NO_ACTION"
+
+
     # Multi-sensor confirmation
     devs = health.deviations if health and health.deviations else {}
     anomalous_sensors = sum(1 for v in devs.values() if isinstance(v, (int, float)) and abs(v) > 1.5)

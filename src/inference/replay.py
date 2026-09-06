@@ -106,7 +106,7 @@ def load_replay_snapshot(
         is_fault = d_result.diagnosis not in ("normal", "unknown", "ambiguous")
         
         # We need a frame-level multi-sensor check for the schmitt trigger
-        f_health = compute_health_score(transformed[:idx+1])
+        f_health = compute_health_score(transformed[max(0, idx-30):idx+1])
         f_devs = f_health.deviations if f_health and f_health.deviations else {}
         f_anomalous = sum(1 for v in f_devs.values() if isinstance(v, (int, float)) and abs(v) > 1.5)
         f_multi = f_anomalous >= 2
