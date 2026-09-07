@@ -114,7 +114,7 @@ export const ExecutiveRibbon: React.FC<ExecutiveRibbonProps> = ({
               {alertState}
             </span>
             <div className="text-xs text-slate-600">
-              <span className="font-semibold text-slate-800">{persistenceCount}</span> consecutive samples
+              <span className="font-semibold text-slate-800">{persistenceCount} / 5</span> consecutive samples
             </div>
           </div>
         </div>

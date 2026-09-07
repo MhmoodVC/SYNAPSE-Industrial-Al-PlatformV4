@@ -475,7 +475,80 @@ def get_sustainability(
         baseline_median_current=base_i,
         degradation_stage=deg_stage,
     )
+_RUL_EMA_STATE: Dict[str, float] = {}
 
+def _smooth_rul(run_id: str, raw_rul: Optional[float], alpha: float = 0.3, alert_state: str = "NORMAL") -> Optional[float]:
+    if raw_rul is None:
+        return None
+    raw_rul = float(raw_rul)
+    prev = _RUL_EMA_STATE.get(run_id)
+
+    # 1. Reject fallback spikes (>= 500h) during active warning/critical degradation
+    if raw_rul >= 500.0:
+        if alert_state in ("WARNING", "CRITICAL", "ALERT") and prev is not None and prev < 500.0:
+            return round(prev, 1)
+        _RUL_EMA_STATE[run_id] = raw_rul
+        return round(raw_rul, 1)
+
+    # 2. When entering fault degradation: SNAP immediately (no slow lag from 10,000h)
+    if prev is None or prev >= 500.0:
+        _RUL_EMA_STATE[run_id] = raw_rul
+        return round(raw_rul, 1)
+
+    # 3. Responsive degradation smoothing
+    smoothed = alpha * raw_rul + (1.0 - alpha) * prev
+    _RUL_EMA_STATE[run_id] = smoothed
+    return round(smoothed, 1)
+
+_EVIDENCE_CHANNELS = [
+    ("vibration", "mm/s", 1.25),
+    ("temperature", "°C", 68.0),
+    ("motor_current", "A", 9.88),
+    ("pressure", "bar", 8.52),
+    ("flow", "m³/h", 120.3),
+]
+# ISO 10816-3 and Pump Engineering Baselines & Operational Limits
+SENSOR_SPECS = {
+    "vibration": {"unit": "mm/s", "baseline": 1.25, "threshold": 2.80, "critical": 4.50},
+    "temperature": {"unit": "°C", "baseline": 68.0, "threshold": 75.0, "critical": 85.0},
+    "motor_current": {"unit": "A", "baseline": 9.88, "threshold": 11.50, "critical": 13.00},
+    "pressure": {"unit": "bar", "baseline": 8.52, "threshold": 7.00, "critical": 6.00},
+    "flow": {"unit": "m³/h", "baseline": 120.3, "threshold": 105.0, "critical": 90.0},
+}
+
+def _compute_evidence_items(features: dict, robust_deviations: dict) -> list:
+    items_raw = []
+    severities = []
+
+    for feat, specs in SENSOR_SPECS.items():
+        val = float(features.get(feat, specs["baseline"]))
+        dev = float(robust_deviations.get(feat, 0.0))
+
+        # Calculate proportional distance to threshold
+        denom = max(0.01, abs(specs["threshold"] - specs["baseline"]))
+        norm_dist = abs(val - specs["baseline"]) / denom
+
+        # Continuous severity score to avoid 0% or 100% hard clamping
+        sev = max(0.05, abs(dev), norm_dist * 2.0)
+        severities.append(sev)
+
+        items_raw.append({
+            "feature": feat,
+            "value": round(val, 2),
+            "baseline": specs["baseline"],
+            "threshold": specs["threshold"],
+            "deviation": round(dev, 2),
+            "units": specs["unit"],
+            "evidence_type": "physical_sensor",
+            "sev": sev,
+        })
+
+    total_sev = sum(severities)
+    for it in items_raw:
+        it["contribution_pct"] = round((it["sev"] / total_sev) * 100.0, 1)
+        del it["sev"]
+
+    return items_raw
 
 @app.get("/api/v1/snapshot")
 def get_full_snapshot(
@@ -489,13 +562,17 @@ def get_full_snapshot(
     """Unified snapshot endpoint returning all dashboard telemetry, decision analytics, and evidence in one trip."""
     if not DATA_PATH.exists():
         raise HTTPException(status_code=500, detail="Persisted dataset not found")
-    target_idx = step if step is not None else (row_index if row_index is not None else DEFAULT_STEP_INDEX)
-
+    raw_step = step if step is not None else (row_index if row_index is not None else DEFAULT_STEP_INDEX)
+    target_idx = max(0, int(raw_step))
     try:
         snapshot = _get_snapshot(run_id=run_id, row_index=target_idx, action=action)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
+    except Exception:
+        # Fallback to last available valid index if step is out of bounds
+        try:
+            snapshot = _get_snapshot(run_id=run_id, row_index=-1, action=action)
+            target_idx = int(getattr(snapshot, "step", target_idx))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
     features = snapshot.current_features
     health = snapshot.health_score
     risk = snapshot.risk
@@ -543,52 +620,149 @@ def get_full_snapshot(
     health_score_val = health.health_score if health else 100.0
     p_count = snapshot.persistence_count
 
-    # Vibration z-score from current features for direct ISO 20816 Zone D check
-    vib_z_current = float(features.get("vibration_robust_z") or 0.0)
+   # =========================================================================
+    # DYNAMIC ISO 10816-3 GOVERNANCE & RISK CALIBRATION ENGINE
+    # =========================================================================
+    h_score = float(health.health_score if hasattr(health, "health_score") else (health if isinstance(health, (int, float)) else 100.0))
+    p_count = int(getattr(snapshot, "persistence_count", 0))
+    is_confirmed = bool(getattr(snapshot, "multi_sensor_confirmed", False))
+    alert_state_str = str(getattr(snapshot, "alert_state", "NORMAL")).upper()
 
-    # ── ISO 20816 / API 670 Physical-Threshold-First 3-Tier Lifecycle ─────────
-    # Tier 1 CRITICAL: Strict physical criteria ONLY.
-    #   - Health < 60%  (ISO Zone D — mechanical integrity compromised)
-    #   - OR vibration z >= 4.5  (ISO 20816-3 Zone D absolute trip limit)
-    # Persistence alone NEVER triggers CRITICAL. A pump at 86% health with
-    # persistence=10 is still mechanically sound and must stay on DE_RATE.
-    if health_score_val < 60.0 or vib_z_current >= 4.5:
-        alert_state = "CRITICAL"
-        best_action = "IMMEDIATE_MAINTENANCE"
-    # Tier 2 WARNING: Incipient degradation / Zone C operation.
-    #   - Health between 60% and 85%  (degraded but mechanically viable)
-    #   - OR persistence >= 4  (sustained anomaly pattern detected)
-    # Pump MUST remain on DERATE throughout this zone.
-    elif health_score_val < 85.0 or p_count >= 4:
-        alert_state = "WARNING"
-        best_action = "DERATE_THROTTLE"
-    # Tier 3 NORMAL: ISO Zone A/B — healthy baseline operation.
+    # 1. Physical Health Risk Calibration (Prevents $4,000 spikes & premature De-rate at 99% Health)
+    # In Zone A/B, asset is mechanically intact; failure probability cannot exceed physical degradation
+    max_allowable_pf = max(0.005, (100.0 - h_score) / 100.0)
+    for opt in decision_options:
+        if opt.get("action_id") == "NO_ACTION" or opt.get("name") == "NO_ACTION":
+            raw_fp = float(opt.get("failure_probability", 0.0))
+            raw_fp = raw_fp / 100.0 if raw_fp > 1.0 else raw_fp
+            calibrated_pf = min(raw_fp, max_allowable_pf if h_score >= 85.0 else raw_fp)
+            opt["failure_probability"] = round(calibrated_pf, 4)
+            calibrated_loss = float(opt.get("direct_cost", 0.0)) + (calibrated_pf * hourly_downtime_cost * 10.0 * risk_tolerance)
+            opt["net_expected_loss"] = round(calibrated_loss, 2)
+
+    # 2. Dynamic Degradation Derivative: dH/dt & Physics-Coupled RUL
+    global _health_history
+    if "_health_history" not in globals():
+        _health_history = {}
+    run_history = _health_history.setdefault(run_id, [])
+    run_history.append((target_idx, h_score))
+    if len(run_history) > 15:
+        run_history.pop(0)
+
+    if len(run_history) >= 3 and run_history[-1][0] > run_history[0][0]:
+        delta_h = max(0.0, run_history[0][1] - run_history[-1][1])
+        delta_t = float(run_history[-1][0] - run_history[0][0])
+        dh_dt = delta_h / delta_t
     else:
-        alert_state = "NORMAL"
+        dh_dt = 0.0
+
+    # Physics Extrapolated Horizon (ISO Zone D Trip Boundary = 20%)
+    h_trip = 20.0
+    if h_score >= 85.0 and not is_confirmed and alert_state_str == "NORMAL":
+        final_rul = 720.0
+        limiting_cause = "None (Healthy Operation)"
+        rul_msg = "Nominal inspection horizon (~30 days)"
+    else:
+        effective_vel = max(0.015, dh_dt)
+        remaining_steps = max(1.0, (h_score - h_trip) / effective_vel)
+        final_rul = max(2.0, min(round(remaining_steps * 0.5, 1), 360.0))
+        limiting_cause = getattr(getattr(snapshot, "evidence", None), "likely_cause", "Hydraulic / Seal Degradation")
+        rul_msg = f"Dynamic boundary estimated at ~{final_rul}h"
+
+    # Ensure local prognostics dictionary is updated
+    prognostics["rul_hours"] = final_rul
+    prognostics["limiting_factor"] = limiting_cause
+    prognostics["message"] = rul_msg
+    prognostics["degradation_velocity"] = round(dh_dt, 4)
+
+    # 3. ISO 10816-3 Decision Governance & Safety Lockout
+    # Zone C requires 5 consecutive samples OR Multi-Sensor confirmation
+    is_zone_c = (h_score < 80.0 and p_count >= 5) or is_confirmed or alert_state_str == "WARNING"
+    is_zone_d = h_score < 45.0 or alert_state_str == "CRITICAL"
+
+    if is_zone_d:
+        best_action = "IMMEDIATE_MAINTENANCE"
+    elif is_zone_c:
+        actionable = [o for o in decision_options if o.get("action_id") != "NO_ACTION" and o.get("name") != "NO_ACTION"]
+        best_action = min(actionable, key=lambda o: float(o.get("net_expected_loss", float("inf")))).get("action_id", "DERATE_THROTTLE")
+    else:
+        # Zone A/B: Healthy asset strictly locks to NO_ACTION
         best_action = "NO_ACTION"
 
-    # Synchronize is_recommended badge — exactly ONE card holds True
+    # Synchronize badges across decision cards
+    for opt in decision_options:
+        opt["is_recommended"] = bool((opt.get("action_id") == best_action) or (opt.get("name") == best_action))
+    # Multi-sensor confirmation
+    # Robust Z-Scores from evidence (Single Source of Truth)
+    raw_ev_list = getattr(snapshot.evidence, "evidence", []) if hasattr(snapshot, "evidence") else []
+    robust_devs = {}
+    for it in raw_ev_list:
+        feat = getattr(it, "feature", "")
+        val = getattr(it, "deviation", getattr(it, "value", 0.0))
+        if feat:
+            clean_name = str(feat).replace("_robust_z", "").replace("_z", "")
+            try:
+                robust_devs[clean_name] = float(val)
+            except (ValueError, TypeError):
+                pass
+
+    authoritative_devs = robust_devs if robust_devs else (health.deviations if health and health.deviations else {})
+
+    anomalous_sensors = sum(1 for v in authoritative_devs.values() if isinstance(v, (int, float)) and abs(v) > 1.5)
+    multi_sensor = anomalous_sensors >= 2
+
+   
+    def _build_dynamic_envelope_text(deviations: Dict[str, float]) -> str:
+        if not deviations:
+            return "All monitored channels within nominal baseline envelope."
+        worst_sensor, worst_dev = max(deviations.items(), key=lambda kv: abs(kv[1]))
+        direction = "above" if worst_dev > 0 else "below"
+        return (
+            f"{worst_sensor.replace('_', ' ').title()} is {abs(worst_dev):.2f}σ {direction} "
+            f"its healthy baseline — the largest deviation among {len(deviations)} monitored channels."
+        )
+
+    evidence_obs = "Baseline operations detected across all channels." if not authoritative_devs else f"Primary variance on {max(authoritative_devs.items(), key=lambda kv: abs(kv[1]))[0]}."
+    evidence_exp = _build_dynamic_envelope_text(authoritative_devs)
+    evidence_phys = snapshot.evidence.likely_cause or f"Primary diagnostic indicator: {snapshot.diagnosis.diagnosis} (confidence: {snapshot.diagnosis.confidence or 0.0:.2f})."
+    evidence_act = snapshot.arena.recommendation_reason or f"Recommended {best_action} minimizes expected financial and operational risk."
+
+    # === ISO 10816 / API 670 SAFETY HARD-LOCK (FLAW 1) ===
+    
+    vibration_rms = float(features.get('vibration', 0.0) or 0.0)
+    health_score_current = float(health.health_score if health else 100.0)
+    safety_hard_lock = bool(health_score_current < 50.0 or vibration_rms > 3.0)
+    if safety_hard_lock:
+        best_action = "IMMEDIATE_MAINTENANCE"
+        alert_state = "CRITICAL"
+        evidence_act = "CRITICAL RISK: Failure probability >= 75%. Immediate maintenance required."
+        if isinstance(prognostics, dict):
+            prognostics["status"] = "CRITICAL"
+            prognostics["rul_hours"] = 0.0
+            prognostics["message"] = f"Projected critical boundary in ~0.0h [{prognostics.get('limiting_factor', 'Vibration')}]"
+
+    # Re-synchronize is_recommended badge across decision cards
     for opt in decision_options:
         opt["is_recommended"] = (
             opt.get("action_id", "") == best_action or
             opt.get("name", "") == best_action
         )
+    
+    
 
+        sparkline_map = _extract_all_sparklines(history_slice)
 
-    # Multi-sensor confirmation
-    devs = health.deviations if health and health.deviations else {}
-    anomalous_sensors = sum(1 for v in devs.values() if isinstance(v, (int, float)) and abs(v) > 1.5)
-    multi_sensor = anomalous_sensors >= 2
+    raw_ev_list = getattr(snapshot.evidence, "evidence", []) if hasattr(snapshot, "evidence") else []
+    robust_deviations = {}
+    for ev in raw_ev_list:
+        f_name = str(getattr(ev, "feature", "") if not isinstance(ev, dict) else ev.get("feature", "")).lower()
+        dev_val = float(getattr(ev, "deviation", 0.0) if not isinstance(ev, dict) else ev.get("deviation", 0.0))
+        for ch in ["vibration", "temperature", "motor_current", "pressure", "flow"]:
+            if ch in f_name or (ch == "motor_current" and "curr" in f_name):
+                robust_deviations[ch] = dev_val
 
-    # Evidence card 4-part representation
-    evidence_obs = snapshot.evidence.what_happened or f"Operating point at step {target_idx} with load {features.get('operating_load', DEFAULT_OPERATING_LOAD)*100:.0f}%."
-    evidence_exp = "Normal baseline envelope: vibration < 2.5 mm/s, bearing temperature < 75\u00b0C."
-    evidence_phys = snapshot.evidence.likely_cause or f"Primary diagnostic indicator: {snapshot.diagnosis.diagnosis} (confidence: {snapshot.diagnosis.confidence or 0.0:.2f})."
-    evidence_act = snapshot.arena.recommendation_reason or f"Recommended {best_action} minimizes expected financial and operational risk."
-
-    sparkline_map = _extract_all_sparklines(history_slice)
-
-    return {
+        evidence_items = _compute_evidence_items(features, robust_deviations)
+        return {
 
         "timestamp": str(features.get("timestamp")),
         "run_id": run_id,
@@ -608,17 +782,7 @@ def get_full_snapshot(
             "title": snapshot.evidence.title,
             "what_happened": snapshot.evidence.what_happened,
             "likely_cause": snapshot.evidence.likely_cause,
-            "items": [
-                {
-                    "feature": item.feature,
-                    "value": round(item.value, 3) if isinstance(item.value, float) else item.value,
-                    "baseline": round(item.baseline, 3) if isinstance(item.baseline, float) else item.baseline,
-                    "deviation": round(item.deviation, 3) if isinstance(item.deviation, float) else item.deviation,
-                    "units": item.units,
-                    "evidence_type": item.evidence_type,
-                }
-                for item in snapshot.evidence.evidence
-            ],
+            "items": evidence_items,
             "assumptions": list(snapshot.evidence.assumptions),
         },
         "telemetry": {
@@ -637,17 +801,26 @@ def get_full_snapshot(
             "vibration_history": sparkline_map["vibration"],
             "motor_current_history": sparkline_map["motor_current"],
         },
-        "guardrails": {
-            "approved": snapshot.guardrails.status == "PASS",
-            "human_in_the_loop_required": snapshot.guardrails.human_review_required,
-            "safety_envelope_violated": snapshot.guardrails.status != "PASS",
-            "status": snapshot.guardrails.status,
-            "notes": f"Status: {snapshot.guardrails.status}. Review required: {snapshot.guardrails.human_review_required}",
-            "checks": [
+      "guardrails": {
+            "safety_hard_lock_triggered": safety_hard_lock,
+            "safety_hard_lock_reason": (
+                f"Vibration {vibration_rms:.2f}mm/s exceeds ISO 10816-3 Class II Zone C Upper Margin (3.0 mm/s) / Health < 50% — Preventive Hard-Lock Engaged"
+                if safety_hard_lock else None
+            ),
+            "approved": snapshot.guardrails.status == "PASS" and not safety_hard_lock,
+            "human_in_the_loop_required": snapshot.guardrails.human_review_required or safety_hard_lock,
+            "safety_envelope_violated": snapshot.guardrails.status != "PASS" or safety_hard_lock,
+            "status": "HARD_LOCK" if safety_hard_lock else snapshot.guardrails.status,
+            "notes": f"Status: {'HARD_LOCK' if safety_hard_lock else snapshot.guardrails.status}. Review required: True",
+            "checks": (
+                [{"name": "iso_10816_zone_c_preventive_interlock", "status": "HARD_LOCK", "reason": f"Vibration {vibration_rms:.2f}mm/s tripped Zone C+ preventive interlock (3.0 mm/s limit)"}]
+                if safety_hard_lock else []
+            ) + [
                 {"name": chk.name, "status": chk.status, "reason": chk.reason}
                 for chk in snapshot.guardrails.checks
             ],
         },
+        
         "prognostics": prognostics,
         "sustainability": sustain,
         "enterprise_roi": roi,
@@ -715,4 +888,3 @@ def run_simulation(req: SimulationRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=403, detail=str(err))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-

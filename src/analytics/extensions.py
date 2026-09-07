@@ -230,46 +230,46 @@ def estimate_remaining_useful_life(
         "confidence": "High",
     }
 
-    # Once persistence >= 4 AND health < 85%, the asset is in CONFIRMED DEGRADED state.
-    # In this state we NEVER return STABLE — doing so causes the 10,000+ hr flicker.
+    # Determine active degradation state
     in_degraded_state = (persistence_count >= 4) and (health < 85.0)
 
-    # Health-derived RUL floor: monotonically decreases as health degrades.
-    # Maps health 85% -> ~500h, 60% -> ~167h, 40% -> ~0h (clamped to 4h).
-    # This is a physics-grounded estimate anchored to the operational wear curve.
     def _health_floor_rul(h: float) -> float:
-        return max(4.0, min(500.0, (h - 40.0) * (500.0 / 45.0)))
+        # Monotonically decreases as health degrades.
+        # Health 85% -> ~500h, 60% -> ~167h, 40% -> ~0h.
+        val = (h - 40.0) * (500.0 / 45.0)
+        return max(0.0, min(500.0, val))
 
-    # Gate 1: Nominal condition or insufficient persistence — return STABLE
-    # UNLESS already confirmed degraded (prevents STABLE flicker on transient clean frames)
-    if (is_nominal_condition or persistence_count < 4) and not in_degraded_state:
-        return _STABLE
-
-    # Gate 2: Both sensors within baseline — return STABLE
-    # Suppressed when in confirmed degraded state (prevents 10,000+ hr jump-back on noise frames)
-    if current_vib_z < 2.5 and current_temp_z < 2.5 and not in_degraded_state:
+    # Gate 1 & 2: Nominal conditions
+    if not in_degraded_state and (is_nominal_condition or persistence_count < 4 or (current_vib_z < 2.5 and current_temp_z < 2.5)):
         return _STABLE
 
     n = len(vib_z_history)
+    _MIN_SLOPE = 0.05
+    _MAX_SLOPE = 2.5
+    
     if n < 5:
-        if in_degraded_state:
-            rul_est = _health_floor_rul(health)
-            return {
-                "status": "DEGRADING",
-                "rul_hours": round(rul_est, 1),
-                "message": f"Degradation confirmed — health-derived estimate: {rul_est:.1f}h",
-                "degradation_velocity": 0.05,
-                "limiting_factor": "Health Index",
-                "confidence": "Advisory",
-            }
-        return {**_STABLE, "message": "Insufficient history for EMA slope.", "confidence": "Advisory"}
+        rul_est = _health_floor_rul(health)
+        return {
+            "status": "DEGRADING",
+            "rul_hours": round(rul_est, 1),
+            "message": f"Degradation confirmed — health-derived estimate: {rul_est:.1f}h",
+            "degradation_velocity": _MIN_SLOPE,
+            "limiting_factor": "Health Index",
+            "confidence": "Advisory",
+        }
 
-    # Rolling 15-frame EMA slope.
-    # Data: 1 sample/second → frame_dt = 1/3600 hr.
-    # Slope ceiling: ±2.5 σ/hr (ISO 20816-3 centrifugal pump limit).
-    # Lower bound: 0.05 σ/hr (minimum detectable degradation velocity).
-    _MIN_SLOPE = 0.05   # σ/hr — minimum credible degradation rate
-    _MAX_SLOPE = 2.5    # σ/hr — ISO 20816-3 hard ceiling
+    # 1. Impulse Noise Filtering (3-sample median filter to reject single-frame spikes)
+    def _median_3(series: list[float]) -> float:
+        if not series:
+            return 0.0
+        if len(series) < 3:
+            return float(series[-1])
+        return float(sorted(series[-3:])[1])
+
+    eff_vib_z = _median_3(vib_z_history)
+    eff_temp_z = _median_3(temp_z_history)
+
+    # 2. EMA Slope Calculation
     window = min(15, n - 1)
     alpha = 0.05
     frame_dt_hr = 1.0 / 3600.0
@@ -289,79 +289,32 @@ def estimate_remaining_useful_life(
     slope_temp = _ema_slope_per_hr(temp_z_history)
     confidence = "High" if n >= 20 else "Moderate"
 
-    # Non-positive slopes: no forward velocity detected.
-    # If confirmed degraded, use health-derived RUL instead of STABLE.
-    if slope_vib <= 0.0 and slope_temp <= 0.0:
-        if in_degraded_state:
-            rul_est = _health_floor_rul(health)
-            return {
-                "status": "DEGRADING",
-                "rul_hours": round(rul_est, 1),
-                "message": f"Trajectory stable but degradation confirmed — {rul_est:.1f}h remaining",
-                "degradation_velocity": _MIN_SLOPE,
-                "limiting_factor": "Health Index",
-                "confidence": confidence,
-            }
-        return {
-            "status": "STABLE",
-            "rul_hours": None,
-            "message": "Trajectory recovering \u2014 degradation velocity non-positive.",
-            "degradation_velocity": 0.0,
-            "limiting_factor": "None",
-            "confidence": confidence,
-        }
+    # 3. Persistence Gate: Thermal channel must persist >= 3 consecutive frames (z >= 3.0)
+    temp_persisted = (len(temp_z_history) >= 3) and all(z >= 3.0 for z in temp_z_history[-3:])
 
-    # Time-to-threshold: RUL = (Z_crit - Z_current) / slope
-    # ISO 20816-3 Zone D boundaries (in normalized σ units).
-    CRIT_VIB_SIGMA = 4.5
-    CRIT_TEMP_SIGMA = 4.0
-
-    def _time_to_threshold(current_z: float, slope: float, threshold: float) -> float:
-        if slope <= 0.0:
-            return float("inf")
-        remaining = threshold - current_z
-        if remaining <= 0.0:
-            # Already past threshold — use health-derived floor (smooth, monotonic)
-            return _health_floor_rul(health)
-        return remaining / slope
-
-    rem_vib = _time_to_threshold(current_vib_z, slope_vib, CRIT_VIB_SIGMA)
-    rem_temp = _time_to_threshold(current_temp_z, slope_temp, CRIT_TEMP_SIGMA)
-
-    if rem_vib <= rem_temp:
-        rul_raw = rem_vib
-        limiting_factor = "Vibration (4.5\u03c3)"
-        active_slope = slope_vib
-    else:
-        rul_raw = rem_temp
-        limiting_factor = "Thermal (4.0\u03c3)"
+    # Only allow Thermal to supersede Vibration if the thermal excursion is confirmed & sustained
+    if temp_persisted and slope_temp > slope_vib:
         active_slope = slope_temp
+        limiting_factor = "Thermal"
+        active_z = eff_temp_z
+    else:
+        active_slope = slope_vib
+        limiting_factor = "Vibration"
+        active_z = eff_vib_z
 
-    if rul_raw == float("inf"):
-        if in_degraded_state:
-            rul_est = _health_floor_rul(health)
-            return {
-                "status": "DEGRADING",
-                "rul_hours": round(rul_est, 1),
-                "message": f"Degradation confirmed — estimated {rul_est:.1f}h",
-                "degradation_velocity": _MIN_SLOPE,
-                "limiting_factor": "Health Index",
-                "confidence": confidence,
-            }
-        return {
-            "status": "STABLE",
-            "rul_hours": None,
-            "message": "No degrading sensor velocity detected.",
-            "degradation_velocity": 0.0,
-            "limiting_factor": "None",
-            "confidence": confidence,
-        }
+    health_rul = _health_floor_rul(health)
 
-    # Clamp: velocity to [0.05, 2.5] σ/hr; RUL to [4.0, 500.0] hours.
-    active_slope_clamped = max(_MIN_SLOPE, min(_MAX_SLOPE, abs(active_slope)))
-    # Health floor ensures RUL never exceeds what the asset wear curve supports
-    health_floor = _health_floor_rul(health)
-    rul_hours = max(4.0, min(500.0, min(rul_raw, health_floor)))
+    if active_slope <= 0.0:
+        rul_hours = health_rul
+        active_slope_clamped = _MIN_SLOPE
+    else:
+        active_slope_clamped = max(_MIN_SLOPE, min(_MAX_SLOPE, active_slope))
+        # Project RUL based exclusively on the validated active channel's slope and filtered Z
+        projected_rul = max(0.0, (4.5 - active_z) / active_slope_clamped)
+        rul_hours = min(health_rul, projected_rul)
+
+    # Ensure RUL stays within realistic mechanical bounds
+    rul_hours = max(0.0, min(500.0, rul_hours))
     status = "CRITICAL" if rul_hours < 24.0 else "DEGRADING"
 
     return {
@@ -371,6 +324,7 @@ def estimate_remaining_useful_life(
         "degradation_velocity": round(active_slope_clamped, 4),
         "limiting_factor": limiting_factor,
         "confidence": confidence,
+    
     }
 def calculate_enterprise_roi(
     annual_failures_baseline: int = 4,

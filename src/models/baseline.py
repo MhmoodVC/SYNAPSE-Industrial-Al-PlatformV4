@@ -165,7 +165,7 @@ def train_baseline_models(
     anomaly_train = _numeric_matrix(clean_normal_features)
     anomaly = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
-        ("model", IsolationForest(random_state=7, contamination=0.1, n_estimators=100)),
+        ("model", IsolationForest(random_state=7, contamination=0.045, n_estimators=100)),
     ])
     anomaly.fit(anomaly_train)
     anomaly_prediction = anomaly.predict(_numeric_matrix(test_features))

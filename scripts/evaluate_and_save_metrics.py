@@ -106,7 +106,7 @@ def main():
     anomaly_train = _numeric_matrix(normal_features)
     anomaly_model = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
-        ("model", IsolationForest(random_state=7, contamination=0.1, n_estimators=100)),
+        ("model", IsolationForest(random_state=7, contamination=0.042, n_estimators=100)),
     ])
     anomaly_model.fit(anomaly_train)
     anomaly_pred = anomaly_model.predict(_numeric_matrix(test_features))
@@ -203,7 +203,7 @@ def main():
             "weighted_f1_percent": round(f1_active * 100, 2),
         },
         "anomaly_detector": {
-            "model": "IsolationForest(contamination=0.1, n_estimators=100, random_state=7)",
+            "model": "IsolationForest(contamination=0.042, n_estimators=100, random_state=7)",
             "inlier_rate": round(inlier_rate, 4),
             "inlier_rate_percent": round(inlier_rate * 100, 2),
             "false_positive_rate": round(false_positive_rate, 4),

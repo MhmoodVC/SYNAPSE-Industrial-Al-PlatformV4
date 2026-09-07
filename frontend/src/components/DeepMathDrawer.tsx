@@ -24,17 +24,23 @@ interface DeepMathDrawerProps {
   evidenceCard: EvidencePart;
   guardrails: GuardrailStatus;
   alertState: string;
+  metrics?: any;
 }
 
 export const DeepMathDrawer: React.FC<DeepMathDrawerProps> = ({
   evidenceCard,
   guardrails,
+  alertState,
+  metrics: propMetrics,
 }) => {
   const [isOpen, setIsOpen] = useState(true);
-  const [metrics, setMetrics] = useState(empiricalMetricsDefault);
+  const [metrics, setMetrics] = useState(propMetrics || empiricalMetricsDefault);
 
-  // Dynamically query API for freshest empirical metrics if available
   useEffect(() => {
+    if (propMetrics) {
+      setMetrics(propMetrics);
+      return;
+    }
     async function fetchEmpiricalMetrics() {
       try {
         const res = await fetch(`${API_BASE}/api/v1/models/metrics`);
@@ -137,10 +143,10 @@ export const DeepMathDrawer: React.FC<DeepMathDrawerProps> = ({
                     Fault Detection Recall
                   </span>
                   <div className="text-2xl sm:text-3xl font-black text-emerald-700 mt-1 tracking-tight">
-                    {((active as any).fault_detection_recall_percent ?? active.weighted_recall_percent).toFixed(1)}%
+                    {active.fault_detection_recall_percent?.toFixed(1) || active.weighted_recall_percent?.toFixed(1) || '0.0'}%
                   </div>
                   <span className="text-[10px] text-slate-400 font-mono block mt-1">
-                    exact: {((active as any).fault_detection_recall ?? active.weighted_recall).toFixed(4)}
+                    exact: {(active.fault_detection_recall || active.weighted_recall || 0).toFixed(4)}
                   </span>
                 </div>
 
@@ -149,10 +155,10 @@ export const DeepMathDrawer: React.FC<DeepMathDrawerProps> = ({
                     Diagnostic Precision
                   </span>
                   <div className="text-2xl sm:text-3xl font-black text-emerald-700 mt-1 tracking-tight">
-                    {((active as any).diagnostic_precision_percent ?? active.weighted_precision_percent).toFixed(1)}%
+                    {active.diagnostic_precision_percent?.toFixed(1) || active.weighted_precision_percent?.toFixed(1) || '0.0'}%
                   </div>
                   <span className="text-[10px] text-slate-400 font-mono block mt-1">
-                    exact: {((active as any).diagnostic_precision ?? active.weighted_precision).toFixed(4)}
+                    exact: {(active.diagnostic_precision || active.weighted_precision || 0).toFixed(4)}
                   </span>
                 </div>
 
@@ -161,10 +167,10 @@ export const DeepMathDrawer: React.FC<DeepMathDrawerProps> = ({
                     Active Phase Accuracy
                   </span>
                   <div className="text-2xl sm:text-3xl font-black text-emerald-700 mt-1 tracking-tight">
-                    {active.accuracy_percent.toFixed(1)}%
+                    {active.accuracy_percent?.toFixed(1) || '0.0'}%
                   </div>
                   <span className="text-[10px] text-slate-400 font-mono block mt-1">
-                    exact: {active.accuracy.toFixed(4)}
+                    exact: {(active.accuracy || 0).toFixed(4)}
                   </span>
                 </div>
 
@@ -173,10 +179,10 @@ export const DeepMathDrawer: React.FC<DeepMathDrawerProps> = ({
                     Harmonic F1-Score
                   </span>
                   <div className="text-2xl sm:text-3xl font-black text-emerald-700 mt-1 tracking-tight">
-                    {((active as any).harmonic_f1_percent ?? active.weighted_f1_percent).toFixed(1)}%
+                    {active.harmonic_f1_percent?.toFixed(1) || active.weighted_f1_percent?.toFixed(1) || '0.0'}%
                   </div>
                   <span className="text-[10px] text-slate-400 font-mono block mt-1">
-                    exact: {((active as any).harmonic_f1 ?? active.weighted_f1).toFixed(4)}
+                    exact: {(active.harmonic_f1 || active.weighted_f1 || 0).toFixed(4)}
                   </span>
                 </div>
               </div>
@@ -194,7 +200,7 @@ export const DeepMathDrawer: React.FC<DeepMathDrawerProps> = ({
                   </p>
                 </div>
                 <span className="text-[10px] font-mono text-slate-400">
-                  Classifier: ExtraTrees (300 estimators, max_depth=26, balanced)
+                  Classifier: {metrics?.model ?? 'HierarchicalPipeline(HistGradientBoosting+ExtraTrees)'}
                 </span>
               </div>
 
@@ -204,13 +210,13 @@ export const DeepMathDrawer: React.FC<DeepMathDrawerProps> = ({
                     Pre-Fault Normal Specificity
                   </span>
                   <div className="text-2xl font-black text-blue-700 mt-0.5">
-                    {(((full as any).normal_specificity_percent ?? 92.15) as number).toFixed(1)}%
+                    {full.normal_specificity_percent?.toFixed(1) || '0.0'}%
                   </div>
                   <span className="text-[10px] text-slate-500 font-medium block mt-1 leading-snug">
                     Correctly recognizes healthy state prior to fault onset
                   </span>
                   <span className="text-[10px] text-slate-400 font-mono block mt-0.5">
-                    exact: {(((full as any).normal_specificity ?? 0.9215) as number).toFixed(4)}
+                    exact: {(full.normal_specificity || 0).toFixed(4)}
                   </span>
                 </div>
 
@@ -219,13 +225,13 @@ export const DeepMathDrawer: React.FC<DeepMathDrawerProps> = ({
                     Point-wise Overall Accuracy
                   </span>
                   <div className="text-2xl font-black text-[#061838] mt-0.5">
-                    {full.accuracy_percent.toFixed(1)}%
+                    {full.accuracy_percent?.toFixed(1) || '0.0'}%
                   </div>
                   <span className="text-[10px] text-slate-500 font-medium block mt-1 leading-snug">
                     Reflects healthy lead-in steps labeled under run-level fault IDs
                   </span>
                   <span className="text-[10px] text-slate-400 font-mono block mt-0.5">
-                    exact: {full.accuracy.toFixed(4)}
+                    exact: {(full.accuracy || 0).toFixed(4)}
                   </span>
                 </div>
 
@@ -234,13 +240,13 @@ export const DeepMathDrawer: React.FC<DeepMathDrawerProps> = ({
                     Macro Precision
                   </span>
                   <div className="text-2xl font-black text-indigo-700 mt-0.5">
-                    {full.macro_precision_percent.toFixed(1)}%
+                    {full.macro_precision_percent?.toFixed(1) || '0.0'}%
                   </div>
                   <span className="text-[10px] text-slate-500 font-medium block mt-1 leading-snug">
                     Unweighted mean precision across all 11 fault classes
                   </span>
                   <span className="text-[10px] text-slate-400 font-mono block mt-0.5">
-                    exact: {full.macro_precision.toFixed(4)}
+                    exact: {(full.macro_precision || 0).toFixed(4)}
                   </span>
                 </div>
 
@@ -249,13 +255,13 @@ export const DeepMathDrawer: React.FC<DeepMathDrawerProps> = ({
                     Macro F1-Score
                   </span>
                   <div className="text-2xl font-black text-purple-700 mt-0.5">
-                    {full.macro_f1_percent.toFixed(1)}%
+                    {full.macro_f1_percent?.toFixed(1) || '0.0'}%
                   </div>
                   <span className="text-[10px] text-slate-500 font-medium block mt-1 leading-snug">
                     Unweighted harmonic mean across all 11 fault categories
                   </span>
                   <span className="text-[10px] text-slate-400 font-mono block mt-0.5">
-                    exact: {full.macro_f1.toFixed(4)}
+                    exact: {(full.macro_f1 || 0).toFixed(4)}
                   </span>
                 </div>
               </div>
@@ -269,218 +275,6 @@ export const DeepMathDrawer: React.FC<DeepMathDrawerProps> = ({
               </div>
             </div>
 
-            {/* Subsection 3: Anomaly Detector (Isolation Forest) */}
-            <div className="space-y-3 mt-4">
-              <div className="flex items-center justify-between text-xs text-slate-600">
-                <span className="font-semibold">
-                  C. Isolation Forest Anomaly Detection (Trained strictly on normal operating records, N={(anom as any).normal_training_rows ?? 7427})
-                </span>
-                <span className="text-[10px] font-mono text-slate-400">
-                  Contamination: 0.10, N_Estimators: 100
-                </span>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                  <span className="text-[10px] uppercase font-bold text-slate-400 block">Normal Inlier Rate</span>
-                  <div className="text-2xl font-black text-[#061838] mt-0.5">
-                    {anom.inlier_rate_percent.toFixed(2)}%
-                  </div>
-                  <span className="text-[10px] text-slate-500 font-mono">exact: {anom.inlier_rate.toFixed(4)}</span>
-                </div>
-                <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                  <span className="text-[10px] uppercase font-bold text-slate-400 block">False Alarm Rate (Alpha)</span>
-                  <div className="text-2xl font-black text-amber-600 mt-0.5">
-                    {anom.false_positive_rate_percent.toFixed(2)}%
-                  </div>
-                  <span className="text-[10px] text-slate-500 font-mono">exact: {anom.false_positive_rate.toFixed(4)} (Suppressed by persistence)</span>
-                </div>
-                <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                  <span className="text-[10px] uppercase font-bold text-slate-400 block">Outlier Anomaly Recall</span>
-                  <div className="text-2xl font-black text-blue-600 mt-0.5">
-                    {anom.outlier_recall_percent.toFixed(2)}%
-                  </div>
-                  <span className="text-[10px] text-slate-500 font-mono">exact: {anom.outlier_recall.toFixed(4)}</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-3 p-3 bg-slate-50 rounded-lg border border-slate-200 text-xs text-slate-600 leading-relaxed flex items-start space-x-2">
-              <Database size={15} className="text-slate-400 shrink-0 mt-0.5" />
-              <div>
-                <strong>Audited Evaluation Data Artifact:</strong> Calculated from{' '}
-                <code className="text-slate-800 font-mono font-bold bg-slate-200/60 px-1 py-0.5 rounded">
-                  {metrics.source_dataset}
-                </code>{' '}
-                evaluated strictly on held-out runs [{metrics.held_out_test_runs?.slice(0, 8).join(', ')}, ...]. Zero causal leakage into baseline profiles.
-              </div>
-            </div>
-          </div>
-
-          {/* Section 2: Industrial Standards & Compliance (ISO 10816-3 & UN SDGs) */}
-          <div className="pt-5 border-t border-slate-200">
-            <div className="flex items-center space-x-2 mb-3">
-              <BookOpen size={16} className="text-indigo-600" />
-              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
-                Industrial Standards & Compliance Suite
-              </h4>
-            </div>
-
-            {/* ISO 10816-3 / ISO 20816-3 Vibration Severity Zones */}
-            <div className="mb-4">
-              <div className="flex items-center justify-between text-xs font-semibold text-slate-600 mb-2">
-                <span>ISO 10816-3 / ISO 20816-3 Vibration Severity Zones (Industrial Centrifugal Pumps)</span>
-                <span className="text-[11px] font-mono text-slate-400">Class II & III Machinery</span>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
-                <div className="p-2.5 rounded-lg border border-emerald-200 bg-emerald-50/60 flex flex-col justify-between">
-                  <div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-emerald-900">Zone A</span>
-                      <span className="text-[10px] font-mono font-bold text-emerald-700">&lt; 1.8 mm/s</span>
-                    </div>
-                    <p className="text-[11px] text-emerald-800 mt-1">
-                      Pristine condition / Newly commissioned machinery.
-                    </p>
-                  </div>
-                  <span className="text-[9px] font-semibold uppercase text-emerald-600 mt-2">Optimal Health</span>
-                </div>
-
-                <div className="p-2.5 rounded-lg border border-blue-200 bg-blue-50/60 flex flex-col justify-between">
-                  <div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-blue-900">Zone B</span>
-                      <span className="text-[10px] font-mono font-bold text-blue-700">1.8 – 2.8 mm/s</span>
-                    </div>
-                    <p className="text-[11px] text-blue-800 mt-1">
-                      Unrestricted continuous long-term operation.
-                    </p>
-                  </div>
-                  <span className="text-[9px] font-semibold uppercase text-blue-600 mt-2">Acceptable</span>
-                </div>
-
-                <div className="p-2.5 rounded-lg border border-amber-200 bg-amber-50/60 flex flex-col justify-between">
-                  <div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-amber-900">Zone C</span>
-                      <span className="text-[10px] font-mono font-bold text-amber-700">2.8 – 4.5 mm/s</span>
-                    </div>
-                    <p className="text-[11px] text-amber-800 mt-1">
-                      Restricted operation; remedial de-rate action recommended.
-                    </p>
-                  </div>
-                  <span className="text-[9px] font-semibold uppercase text-amber-600 mt-2">Remedial Warning</span>
-                </div>
-
-                <div className="p-2.5 rounded-lg border border-rose-200 bg-rose-50/60 flex flex-col justify-between">
-                  <div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-rose-900">Zone D</span>
-                      <span className="text-[10px] font-mono font-bold text-rose-700">&gt; 4.5 mm/s</span>
-                    </div>
-                    <p className="text-[11px] text-rose-800 mt-1">
-                      Critical danger zone; immediate trip or turnaround shutdown.
-                    </p>
-                  </div>
-                  <span className="text-[9px] font-semibold uppercase text-rose-600 mt-2">Trip / Shutdown</span>
-                </div>
-              </div>
-            </div>
-
-            {/* UN Sustainable Development Goals (SDGs) */}
-            <div className="pt-3 border-t border-slate-100">
-              <div className="flex items-center space-x-1.5 text-xs font-semibold text-slate-600 mb-2">
-                <Globe size={13} className="text-emerald-600" />
-                <span>United Nations Sustainability Alignment</span>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div className="p-3 rounded-lg border border-slate-200 bg-slate-50 flex items-start space-x-2.5">
-                  <span className="px-2 py-1 rounded text-xs font-black bg-orange-100 text-orange-800 border border-orange-200 shrink-0">
-                    SDG 9
-                  </span>
-                  <div>
-                    <span className="text-xs font-bold text-slate-800 block">Industry & Innovation</span>
-                    <p className="text-[11px] text-slate-600 mt-0.5">
-                      Autonomous edge AI condition monitoring eliminating unscheduled plant downtime.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="p-3 rounded-lg border border-slate-200 bg-slate-50 flex items-start space-x-2.5">
-                  <span className="px-2 py-1 rounded text-xs font-black bg-amber-100 text-amber-800 border border-amber-200 shrink-0">
-                    SDG 12
-                  </span>
-                  <div>
-                    <span className="text-xs font-bold text-slate-800 block">Responsible Production</span>
-                    <p className="text-[11px] text-slate-600 mt-0.5">
-                      Extends asset lifecycle through early de-rating, preventing premature component scrapping.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="p-3 rounded-lg border border-slate-200 bg-slate-50 flex items-start space-x-2.5">
-                  <span className="px-2 py-1 rounded text-xs font-black bg-emerald-100 text-emerald-800 border border-emerald-200 shrink-0">
-                    SDG 13
-                  </span>
-                  <div>
-                    <span className="text-xs font-bold text-slate-800 block">Climate Action</span>
-                    <p className="text-[11px] text-slate-600 mt-0.5">
-                      Quantifies and eliminates parasitic motor load, curbing avoidable grid CO₂ emissions.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Section 3: Traceable Evidence Card (4-Part Taxonomy) */}
-          <div className="pt-5 border-t border-slate-200">
-            <div className="flex items-center space-x-2 mb-3">
-              <FileText size={15} className="text-blue-600" />
-              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
-                Traceable Evidence Card (4-Part Taxonomy)
-              </h4>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-              <div className="p-3.5 rounded-lg border border-slate-200 bg-slate-50/50">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
-                  1. Primary Observation
-                </span>
-                <p className="text-xs font-medium text-slate-800 leading-relaxed">
-                  {evidenceCard?.observation || 'Awaiting live sensor stream...'}
-                </p>
-              </div>
-
-              <div className="p-3.5 rounded-lg border border-slate-200 bg-slate-50/50">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
-                  2. Baseline Expectation
-                </span>
-                <p className="text-xs font-medium text-slate-800 leading-relaxed">
-                  {evidenceCard?.expected || 'Nominal operating envelope baseline'}
-                </p>
-              </div>
-
-              <div className="p-3.5 rounded-lg border border-blue-200 bg-blue-50/30">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-blue-700 block mb-1">
-                  3. Physical Interpretation
-                </span>
-                <p className="text-xs font-medium text-blue-950 leading-relaxed">
-                  {evidenceCard?.physics_interpretation || 'Hydrodynamic pressure & vibration analysis'}
-                </p>
-              </div>
-
-              <div className="p-3.5 rounded-lg border border-emerald-200 bg-emerald-50/30">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 block mb-1">
-                  4. Action Rationale
-                </span>
-                <p className="text-xs font-medium text-emerald-950 leading-relaxed">
-                  {evidenceCard?.action_rationale || 'Optimal policy recommendation based on expected loss'}
-                </p>
-              </div>
-            </div>
           </div>
 
           {/* Section 4: Mathematical Formulations & Causal Proofs */}

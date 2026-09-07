@@ -118,22 +118,21 @@ def load_replay_snapshot(
             persistence_count = max(0, persistence_count - 1)
             consecutive_clean += 1
                 
-        # Schmitt Trigger State Machine
-        if alert_state == "NORMAL":
-            if persistence_count >= 8 and f_multi:
+        f_health_val = f_health.health_score if f_health else 100.0
+        
+        # Schmitt Trigger State Machine with True Latching
+        if alert_state != "CRITICAL":
+            # CRITICAL Gate
+            if f_health_val < 60.0 or (f_health_val < 75.0 and persistence_count >= 8 and f_multi):
                 alert_state = "CRITICAL"
-            elif persistence_count >= 4:
+            # WARNING Gate
+            elif f_health_val < 85.0 or persistence_count >= 4:
                 alert_state = "WARNING"
-        elif alert_state == "WARNING":
-            if persistence_count <= 1:
-                alert_state = "NORMAL"
-            elif persistence_count >= 8 and f_multi:
-                alert_state = "CRITICAL"
-        elif alert_state == "CRITICAL":
-            if persistence_count <= 4:
-                alert_state = "WARNING"
-            if persistence_count <= 1:
-                alert_state = "NORMAL"
+            # De-escalation from WARNING to NORMAL requires healthy state and no persistence
+            elif alert_state == "WARNING":
+                if persistence_count <= 1 and f_health_val >= 85.0:
+                    alert_state = "NORMAL"
+        # Once CRITICAL, it latches. No de-escalation.
                 
     latched_alarm = alert_state in ("WARNING", "CRITICAL")
     is_confirmed = latched_alarm
