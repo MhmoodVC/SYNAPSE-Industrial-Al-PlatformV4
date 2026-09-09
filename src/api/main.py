@@ -32,6 +32,43 @@ from data.persistence import load_synthetic_csv
 from decision.simulation import SimulationApprovalError, simulate_action
 from inference.replay import ReplaySnapshot, load_replay_snapshot
 
+# ============================================================
+# LIVE HARDWARE MODE SUPPORT (Firebase Cloud Ingestion)
+# ============================================================
+import os
+
+LIVE_HARDWARE_MODE = os.getenv("LIVE_HARDWARE_MODE", "false").lower() == "true"
+
+if LIVE_HARDWARE_MODE:
+    try:
+        from realtime.firebase_listener import (
+            start_firebase_listener,
+            get_latest_reading,
+            get_sensor_buffer,
+        )
+        from realtime.live_features import LiveFeatureExtractor
+        import joblib
+
+        PIPELINE_PATH = Path(__file__).resolve().parents[2] / "models" / "exported" / "pipeline_live.joblib"
+        
+        if not PIPELINE_PATH.exists():
+            print(f"⚠️ WARNING: {PIPELINE_PATH} not found. Live mode disabled.")
+            LIVE_HARDWARE_MODE = False
+        else:
+            artifact = joblib.load(PIPELINE_PATH)
+            live_pipeline = artifact["pipeline"]
+            live_feature_cols = artifact["feature_cols"]
+            live_threshold = artifact["threshold"]
+            live_extractor = LiveFeatureExtractor()
+
+            FIREBASE_POLL_INTERVAL = float(os.getenv("FIREBASE_POLL_INTERVAL", "1.0"))
+            
+            start_firebase_listener(poll_interval=FIREBASE_POLL_INTERVAL)
+            print(f"✅ Live Hardware Mode ENABLED via Firebase (polling every {FIREBASE_POLL_INTERVAL}s)")
+    except ImportError as e:
+        print(f"⚠️ Live hardware dependencies missing: {e}. Falling back to replay mode.")
+        LIVE_HARDWARE_MODE = False
+
 # -------------------------------------------------------------
 # Domain Constants & Configuration
 # -------------------------------------------------------------
@@ -475,6 +512,7 @@ def get_sustainability(
         baseline_median_current=base_i,
         degradation_stage=deg_stage,
     )
+
 _RUL_EMA_STATE: Dict[str, float] = {}
 
 def _smooth_rul(run_id: str, raw_rul: Optional[float], alpha: float = 0.3, alert_state: str = "NORMAL") -> Optional[float]:
@@ -483,19 +521,16 @@ def _smooth_rul(run_id: str, raw_rul: Optional[float], alpha: float = 0.3, alert
     raw_rul = float(raw_rul)
     prev = _RUL_EMA_STATE.get(run_id)
 
-    # 1. Reject fallback spikes (>= 500h) during active warning/critical degradation
     if raw_rul >= 500.0:
         if alert_state in ("WARNING", "CRITICAL", "ALERT") and prev is not None and prev < 500.0:
             return round(prev, 1)
         _RUL_EMA_STATE[run_id] = raw_rul
         return round(raw_rul, 1)
 
-    # 2. When entering fault degradation: SNAP immediately (no slow lag from 10,000h)
     if prev is None or prev >= 500.0:
         _RUL_EMA_STATE[run_id] = raw_rul
         return round(raw_rul, 1)
 
-    # 3. Responsive degradation smoothing
     smoothed = alpha * raw_rul + (1.0 - alpha) * prev
     _RUL_EMA_STATE[run_id] = smoothed
     return round(smoothed, 1)
@@ -507,7 +542,7 @@ _EVIDENCE_CHANNELS = [
     ("pressure", "bar", 8.52),
     ("flow", "m³/h", 120.3),
 ]
-# ISO 10816-3 and Pump Engineering Baselines & Operational Limits
+
 SENSOR_SPECS = {
     "vibration": {"unit": "mm/s", "baseline": 1.25, "threshold": 2.80, "critical": 4.50},
     "temperature": {"unit": "°C", "baseline": 68.0, "threshold": 75.0, "critical": 85.0},
@@ -524,11 +559,9 @@ def _compute_evidence_items(features: dict, robust_deviations: dict) -> list:
         val = float(features.get(feat, specs["baseline"]))
         dev = float(robust_deviations.get(feat, 0.0))
 
-        # Calculate proportional distance to threshold
         denom = max(0.01, abs(specs["threshold"] - specs["baseline"]))
         norm_dist = abs(val - specs["baseline"]) / denom
 
-        # Continuous severity score to avoid 0% or 100% hard clamping
         sev = max(0.05, abs(dev), norm_dist * 2.0)
         severities.append(sev)
 
@@ -560,19 +593,199 @@ def get_full_snapshot(
     action: str = Query(DEFAULT_ACTION),
 ) -> Dict[str, Any]:
     """Unified snapshot endpoint returning all dashboard telemetry, decision analytics, and evidence in one trip."""
+    
+    # ============================================================
+    # LIVE HARDWARE OVERRIDE (Firebase Cloud Ingestion)
+    # ============================================================
+    if LIVE_HARDWARE_MODE:
+        latest = get_latest_reading()
+        buffer = get_sensor_buffer()
+
+        if latest is None or len(buffer) < 60:
+            warm_up_sec = 60 - len(buffer) if buffer else 60
+            raise HTTPException(
+                status_code=503,
+                detail=f"Live hardware warming up. Need {warm_up_sec}s more (currently {len(buffer)}/60 samples)."
+            )
+
+        # Build live features
+        live_extractor.reset()
+        for reading in buffer:
+            live_extractor.add_reading(
+                pressure=reading.get("pressure"),
+                flow=reading.get("flow"),
+                temperature=reading.get("temperature"),
+                vibration=reading.get("vibration"),
+                motor_current=reading.get("motor_current"),
+                operating_load=reading.get("operating_load", 0.70),
+            )
+
+        features_df = live_extractor.compute_features()
+        if features_df is None or features_df.empty:
+            raise HTTPException(status_code=500, detail="Live feature extraction failed")
+
+        # Inference
+        X_live = features_df[live_feature_cols].fillna(0)
+        preds, probs = live_pipeline.predict(X_live)
+
+        stage1_prob = float(probs[0])
+        is_anomaly = stage1_prob >= live_threshold
+        diagnosis = str(preds[0]) if is_anomaly else "normal"
+
+        # Health Score
+        health_score = max(0.0, 100.0 - (stage1_prob * 100))
+
+        # Alert State Logic
+        if health_score < 50.0 or stage1_prob > 0.80:
+            alert_state = "CRITICAL"
+            best_action = "IMMEDIATE_MAINTENANCE"
+        elif is_anomaly:
+            alert_state = "WARNING"
+            best_action = "DERATE_THROTTLE"
+        else:
+            alert_state = "NORMAL"
+            best_action = "NO_ACTION"
+
+        # Decision Options
+        decision_options = [
+            {
+                "action_id": "NO_ACTION",
+                "name": "No Action",
+                "direct_cost": 0.0,
+                "risk_score": round(stage1_prob, 3),
+                "failure_probability": round(stage1_prob, 3),
+                "post_action_load": 1.0,
+                "net_expected_loss": round(stage1_prob * hourly_downtime_cost * 10, 2),
+                "requires_human_approval": False,
+                "justification": f"Continue operation at current risk level ({stage1_prob*100:.1f}%)",
+                "is_recommended": best_action == "NO_ACTION",
+            },
+            {
+                "action_id": "DERATE_THROTTLE",
+                "name": "De-rate / Throttle",
+                "direct_cost": 250.0,
+                "risk_score": round(stage1_prob * 0.8, 3),
+                "failure_probability": round(stage1_prob * 0.64, 3),
+                "post_action_load": 0.75,
+                "net_expected_loss": round(250 + stage1_prob * 0.64 * hourly_downtime_cost * 10, 2),
+                "requires_human_approval": True,
+                "justification": "Throttle to 75% to reduce mechanical stress",
+                "is_recommended": best_action == "DERATE_THROTTLE",
+            },
+            {
+                "action_id": "IMMEDIATE_MAINTENANCE",
+                "name": "Immediate Maintenance",
+                "direct_cost": 1400.0,
+                "risk_score": 0.0,
+                "failure_probability": 0.0,
+                "post_action_load": 0.0,
+                "net_expected_loss": 1400.0,
+                "requires_human_approval": True,
+                "justification": "Planned shutdown eliminates catastrophic failure risk",
+                "is_recommended": best_action == "IMMEDIATE_MAINTENANCE",
+            },
+        ]
+
+        return {
+            "timestamp": latest.get("timestamp"),
+            "run_id": "live_hardware",
+            "step": len(buffer),
+            "row_index": len(buffer),
+            "health_score": round(health_score, 1),
+            "alert_state": alert_state,
+            "persistence_count": 1,
+            "multi_sensor_confirmed": False,
+            "recommended_action": best_action,
+            "decision_options": decision_options,
+            "evidence_card": {
+                "observation": f"Live reading at {latest.get('timestamp')}",
+                "expected": "Normal baseline envelope",
+                "physics_interpretation": f"Diagnosis: {diagnosis} (confidence: {stage1_prob:.2f})",
+                "action_rationale": f"Recommended {best_action} based on current anomaly probability",
+                "title": "Live Hardware Evidence",
+                "what_happened": f"Stage 1 anomaly score: {stage1_prob*100:.1f}%",
+                "likely_cause": diagnosis.replace("_", " ").title(),
+                "items": [],
+                "assumptions": ["Live inference mode", "Features computed from rolling 1800-sample buffer"],
+            },
+            "telemetry": {
+                "timestamp": latest.get("timestamp"),
+                "run_id": "live_hardware",
+                "step": len(buffer),
+                "pressure": float(latest.get("pressure", 0.0)),
+                "flow": float(latest.get("flow", 0.0)),
+                "temperature": float(latest.get("temperature", 0.0)),
+                "vibration": float(latest.get("vibration", 0.0)),
+                "motor_current": float(latest.get("motor_current", 0.0)),
+                "operating_load": float(latest.get("operating_load", 0.70)),
+                "pressure_history": [r.get("pressure", 0.0) for r in buffer[-30:]],
+                "flow_history": [r.get("flow", 0.0) for r in buffer[-30:]],
+                "temperature_history": [r.get("temperature", 0.0) for r in buffer[-30:]],
+                "vibration_history": [r.get("vibration", 0.0) for r in buffer[-30:]],
+                "motor_current_history": [r.get("motor_current", 0.0) for r in buffer[-30:]],
+            },
+            "guardrails": {
+                "approved": alert_state != "CRITICAL",
+                "human_in_the_loop_required": alert_state == "CRITICAL",
+                "safety_envelope_violated": alert_state == "CRITICAL",
+                "status": "PASS" if alert_state == "NORMAL" else "WARNING",
+                "notes": f"Live mode: {alert_state}",
+                "checks": [],
+            },
+            "prognostics": {
+                "rul_hours": None,
+                "degradation_velocity": 0.0,
+                "limiting_factor": "Live Mode",
+                "confidence": "Low",
+                "status": "LIVE",
+                "message": "RUL estimation requires historical trend (>5 min)",
+            },
+            "sustainability": {
+                "excess_power_kw": 0.0,
+                "avoidable_co2_kg_per_h": 0.0,
+                "annual_carbon_waste_tonnes": 0.0,
+                "waste_percentage": 0.0,
+            },
+            "enterprise_roi": calculate_enterprise_roi(),
+            "health": {
+                "score": round(health_score, 1),
+                "status": alert_state,
+                "aggregate_deviation": 0.0,
+                "deviations": {},
+            },
+            "risk": {
+                "score": round(stage1_prob, 3),
+                "level": alert_state,
+                "review_required": alert_state == "CRITICAL",
+                "contributions": [],
+            },
+            "diagnosis": {
+                "condition": diagnosis,
+                "confidence": round(stage1_prob, 3),
+                "review_required": is_anomaly,
+                "reason": f"Stage 1 gate output: {stage1_prob*100:.1f}%",
+                "ranked_probabilities": [],
+            },
+        }
+    
+    # ============================================================
+    # REPLAY MODE (Original Logic — UNCHANGED)
+    # ============================================================
     if not DATA_PATH.exists():
         raise HTTPException(status_code=500, detail="Persisted dataset not found")
+    
     raw_step = step if step is not None else (row_index if row_index is not None else DEFAULT_STEP_INDEX)
     target_idx = max(0, int(raw_step))
+    
     try:
         snapshot = _get_snapshot(run_id=run_id, row_index=target_idx, action=action)
     except Exception:
-        # Fallback to last available valid index if step is out of bounds
         try:
             snapshot = _get_snapshot(run_id=run_id, row_index=-1, action=action)
             target_idx = int(getattr(snapshot, "step", target_idx))
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+    
     features = snapshot.current_features
     health = snapshot.health_score
     risk = snapshot.risk
@@ -586,9 +799,6 @@ def get_full_snapshot(
     risk_deg = float(risk.score) if risk else 0.0
     deg_stage = max(health_deg, risk_deg * 0.5)
 
-    # Domain analytics computations
-    # Pass the last 30 raw observations so estimate_remaining_useful_life can compute
-    # a real historical slope (n >= 5 path) rather than the single-record fallback.
     recent_obs = list(snapshot.observations[max(0, target_idx - 29): target_idx + 1])
     sustain = compute_sustainability_metrics(
         actual_current=actual_i,
@@ -620,16 +830,11 @@ def get_full_snapshot(
     health_score_val = health.health_score if health else 100.0
     p_count = snapshot.persistence_count
 
-   # =========================================================================
-    # DYNAMIC ISO 10816-3 GOVERNANCE & RISK CALIBRATION ENGINE
-    # =========================================================================
     h_score = float(health.health_score if hasattr(health, "health_score") else (health if isinstance(health, (int, float)) else 100.0))
     p_count = int(getattr(snapshot, "persistence_count", 0))
     is_confirmed = bool(getattr(snapshot, "multi_sensor_confirmed", False))
     alert_state_str = str(getattr(snapshot, "alert_state", "NORMAL")).upper()
 
-    # 1. Physical Health Risk Calibration (Prevents $4,000 spikes & premature De-rate at 99% Health)
-    # In Zone A/B, asset is mechanically intact; failure probability cannot exceed physical degradation
     max_allowable_pf = max(0.005, (100.0 - h_score) / 100.0)
     for opt in decision_options:
         if opt.get("action_id") == "NO_ACTION" or opt.get("name") == "NO_ACTION":
@@ -640,7 +845,6 @@ def get_full_snapshot(
             calibrated_loss = float(opt.get("direct_cost", 0.0)) + (calibrated_pf * hourly_downtime_cost * 10.0 * risk_tolerance)
             opt["net_expected_loss"] = round(calibrated_loss, 2)
 
-    # 2. Dynamic Degradation Derivative: dH/dt & Physics-Coupled RUL
     global _health_history
     if "_health_history" not in globals():
         _health_history = {}
@@ -656,7 +860,6 @@ def get_full_snapshot(
     else:
         dh_dt = 0.0
 
-    # Physics Extrapolated Horizon (ISO Zone D Trip Boundary = 20%)
     h_trip = 20.0
     if h_score >= 85.0 and not is_confirmed and alert_state_str == "NORMAL":
         final_rul = 720.0
@@ -669,14 +872,11 @@ def get_full_snapshot(
         limiting_cause = getattr(getattr(snapshot, "evidence", None), "likely_cause", "Hydraulic / Seal Degradation")
         rul_msg = f"Dynamic boundary estimated at ~{final_rul}h"
 
-    # Ensure local prognostics dictionary is updated
     prognostics["rul_hours"] = final_rul
     prognostics["limiting_factor"] = limiting_cause
     prognostics["message"] = rul_msg
     prognostics["degradation_velocity"] = round(dh_dt, 4)
 
-    # 3. ISO 10816-3 Decision Governance & Safety Lockout
-    # Zone C requires 5 consecutive samples OR Multi-Sensor confirmation
     is_zone_c = (h_score < 80.0 and p_count >= 5) or is_confirmed or alert_state_str == "WARNING"
     is_zone_d = h_score < 45.0 or alert_state_str == "CRITICAL"
 
@@ -686,14 +886,11 @@ def get_full_snapshot(
         actionable = [o for o in decision_options if o.get("action_id") != "NO_ACTION" and o.get("name") != "NO_ACTION"]
         best_action = min(actionable, key=lambda o: float(o.get("net_expected_loss", float("inf")))).get("action_id", "DERATE_THROTTLE")
     else:
-        # Zone A/B: Healthy asset strictly locks to NO_ACTION
         best_action = "NO_ACTION"
 
-    # Synchronize badges across decision cards
     for opt in decision_options:
         opt["is_recommended"] = bool((opt.get("action_id") == best_action) or (opt.get("name") == best_action))
-    # Multi-sensor confirmation
-    # Robust Z-Scores from evidence (Single Source of Truth)
+
     raw_ev_list = getattr(snapshot.evidence, "evidence", []) if hasattr(snapshot, "evidence") else []
     robust_devs = {}
     for it in raw_ev_list:
@@ -707,11 +904,9 @@ def get_full_snapshot(
                 pass
 
     authoritative_devs = robust_devs if robust_devs else (health.deviations if health and health.deviations else {})
-
     anomalous_sensors = sum(1 for v in authoritative_devs.values() if isinstance(v, (int, float)) and abs(v) > 1.5)
     multi_sensor = anomalous_sensors >= 2
 
-   
     def _build_dynamic_envelope_text(deviations: Dict[str, float]) -> str:
         if not deviations:
             return "All monitored channels within nominal baseline envelope."
@@ -727,11 +922,10 @@ def get_full_snapshot(
     evidence_phys = snapshot.evidence.likely_cause or f"Primary diagnostic indicator: {snapshot.diagnosis.diagnosis} (confidence: {snapshot.diagnosis.confidence or 0.0:.2f})."
     evidence_act = snapshot.arena.recommendation_reason or f"Recommended {best_action} minimizes expected financial and operational risk."
 
-    # === ISO 10816 / API 670 SAFETY HARD-LOCK (FLAW 1) ===
-    
     vibration_rms = float(features.get('vibration', 0.0) or 0.0)
     health_score_current = float(health.health_score if health else 100.0)
     safety_hard_lock = bool(health_score_current < 50.0 or vibration_rms > 3.0)
+    
     if safety_hard_lock:
         best_action = "IMMEDIATE_MAINTENANCE"
         alert_state = "CRITICAL"
@@ -741,18 +935,14 @@ def get_full_snapshot(
             prognostics["rul_hours"] = 0.0
             prognostics["message"] = f"Projected critical boundary in ~0.0h [{prognostics.get('limiting_factor', 'Vibration')}]"
 
-    # Re-synchronize is_recommended badge across decision cards
     for opt in decision_options:
         opt["is_recommended"] = (
             opt.get("action_id", "") == best_action or
             opt.get("name", "") == best_action
         )
-    
-    
 
-        sparkline_map = _extract_all_sparklines(history_slice)
+    sparkline_map = _extract_all_sparklines(history_slice)
 
-    raw_ev_list = getattr(snapshot.evidence, "evidence", []) if hasattr(snapshot, "evidence") else []
     robust_deviations = {}
     for ev in raw_ev_list:
         f_name = str(getattr(ev, "feature", "") if not isinstance(ev, dict) else ev.get("feature", "")).lower()
@@ -761,9 +951,9 @@ def get_full_snapshot(
             if ch in f_name or (ch == "motor_current" and "curr" in f_name):
                 robust_deviations[ch] = dev_val
 
-        evidence_items = _compute_evidence_items(features, robust_deviations)
-        return {
-
+    evidence_items = _compute_evidence_items(features, robust_deviations)
+    
+    return {
         "timestamp": str(features.get("timestamp")),
         "run_id": run_id,
         "step": target_idx,
@@ -801,7 +991,7 @@ def get_full_snapshot(
             "vibration_history": sparkline_map["vibration"],
             "motor_current_history": sparkline_map["motor_current"],
         },
-      "guardrails": {
+        "guardrails": {
             "safety_hard_lock_triggered": safety_hard_lock,
             "safety_hard_lock_reason": (
                 f"Vibration {vibration_rms:.2f}mm/s exceeds ISO 10816-3 Class II Zone C Upper Margin (3.0 mm/s) / Health < 50% — Preventive Hard-Lock Engaged"
@@ -820,7 +1010,6 @@ def get_full_snapshot(
                 for chk in snapshot.guardrails.checks
             ],
         },
-        
         "prognostics": prognostics,
         "sustainability": sustain,
         "enterprise_roi": roi,
